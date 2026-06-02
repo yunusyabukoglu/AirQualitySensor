@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0e1116">
+<link rel="manifest" href="manifest.json">
 <title>AQ Monitor</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   :root {
     --bg: #0e1116;
@@ -406,7 +407,7 @@ document.querySelectorAll('.tabbar button').forEach(b => {
 });
 
 // ---------- History chart ----------
-let chart, currentMetric = 'co2';
+let currentMetric = 'co2';
 const metricLabels = { co2:'CO₂ (ppm)', pm25:'PM2.5 (µg/m³)', pm10:'PM10 (µg/m³)', voc:'VOC Index', nox:'NOx Index', temp:'Temp (°C)', hum:'Humidity (%)' };
 
 document.querySelectorAll('#metricSelect button').forEach(b => {
@@ -431,34 +432,76 @@ function updateHistoryMeta() {
 function drawChart() {
   updateHistoryMeta();
   const empty = document.getElementById('histEmpty');
-  if (history.length === 0) { empty.style.display = 'block'; if (chart) chart.destroy(), chart=null; return; }
+  const canvas = document.getElementById('histChart');
+  const data = history.map(h => h[currentMetric]).filter(v => v !== undefined && v !== null);
+
+  if (data.length < 2) {
+    empty.style.display = 'block';
+    const c = canvas.getContext('2d');
+    c.clearRect(0, 0, canvas.width, canvas.height);
+    return;
+  }
   empty.style.display = 'none';
 
-  const labels = history.map(h => new Date(h.t).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}));
-  const data = history.map(h => h[currentMetric]);
+  // Size the canvas to its display width, scaled for crisp lines on hi-dpi screens
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth || 320;
+  const H = 220;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
 
-  if (chart) chart.destroy();
-  chart = new Chart(document.getElementById('histChart'), {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        label: metricLabels[currentMetric],
-        data,
-        borderColor: '#4da3ff',
-        backgroundColor: 'rgba(77,163,255,0.1)',
-        borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true
-      }]
-    },
-    options: {
-      responsive: true,
-      plugins: { legend: { labels: { color: '#8b949e' } } },
-      scales: {
-        x: { ticks: { color: '#8b949e', maxTicksLimit: 6 }, grid: { color: '#2a3340' } },
-        y: { ticks: { color: '#8b949e' }, grid: { color: '#2a3340' } }
-      }
-    }
-  });
+  const pad = { l: 44, r: 12, t: 12, b: 26 };
+  const plotW = W - pad.l - pad.r;
+  const plotH = H - pad.t - pad.b;
+
+  let min = Math.min(...data), max = Math.max(...data);
+  if (min === max) { min -= 1; max += 1; }       // avoid flat-line divide-by-zero
+  const pday = (max - min) * 0.1;                  // 10% padding top/bottom
+  min -= pday; max += pday;
+  const range = max - min;
+
+  // Grid lines + Y labels
+  ctx.strokeStyle = '#2a3340';
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '10px -apple-system, sans-serif';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + plotH * i / 4;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    const val = max - range * i / 4;
+    ctx.fillText(val.toFixed(range < 10 ? 1 : 0), 4, y + 3);
+  }
+
+  // X labels: first and last timestamp
+  const tFirst = new Date(history[0].t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const tLast  = new Date(history[history.length - 1].t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  ctx.fillText(tFirst, pad.l, H - 8);
+  ctx.fillText(tLast, W - pad.r - ctx.measureText(tLast).width, H - 8);
+
+  // The line
+  const px = i => pad.l + plotW * i / (data.length - 1);
+  const py = v => pad.t + plotH * (1 - (v - min) / range);
+
+  ctx.beginPath();
+  data.forEach((v, i) => { i === 0 ? ctx.moveTo(px(i), py(v)) : ctx.lineTo(px(i), py(v)); });
+  ctx.strokeStyle = '#4da3ff';
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  // Fill under the line
+  ctx.lineTo(px(data.length - 1), H - pad.b);
+  ctx.lineTo(px(0), H - pad.b);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(77,163,255,0.12)';
+  ctx.fill();
+
+  // Title
+  ctx.fillStyle = '#8b949e';
+  ctx.fillText(metricLabels[currentMetric], pad.l, 10);
 }
 
 // ---------- Init ----------
@@ -466,6 +509,11 @@ updateIntervalDisplay(30);
 updateHistoryMeta();
 if (!navigator.bluetooth) {
   alert('Web Bluetooth not supported in this browser. Use Chrome on Android, or the Bluefy browser on iOS.');
+}
+
+// Register service worker so the app works offline after the first load
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(e => console.log('SW registration failed:', e));
 }
 </script>
 </body>
