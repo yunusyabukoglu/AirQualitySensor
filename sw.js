@@ -4,7 +4,7 @@
  * Bump CACHE_NAME (e.g. v1 -> v2) whenever you change index.html so phones
  * pick up the new version instead of serving the old cached copy.
  */
-const CACHE_NAME = 'aq-monitor-v7';
+const CACHE_NAME = 'aq-monitor-v8';
 const ASSETS = [
   './',
   './index.html',

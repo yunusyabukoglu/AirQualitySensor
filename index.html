@@ -222,6 +222,12 @@
       </div>
       <div style="font-size:12px; color:var(--mute); margin-top:10px;" id="gpsStatus">Location off — readings won't be mapped.</div>
     </div>
+
+    <details class="control-group" style="margin-top:14px;">
+      <summary style="cursor:pointer; font-size:13px; color:var(--mute);">Connection debug log</summary>
+      <pre id="dbgLog" style="margin-top:10px; font-size:11px; line-height:1.5; color:var(--text); white-space:pre-wrap; word-break:break-word; max-height:240px; overflow:auto; background:#0b0e13; border:1px solid var(--line); border-radius:8px; padding:10px;"></pre>
+      <button class="secondary" id="dbgClear" style="margin-top:8px; padding:4px 10px; font-size:11px;">Clear log</button>
+    </details>
   </div>
 </div>
 
@@ -333,6 +339,16 @@ let reconnectTimer = null;
 let connecting = false;   // guard so manual + background connects don't race each other
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// On-screen debug log (phone has no easy access to the JS console)
+function dbg(msg) {
+  const el = document.getElementById('dbgLog');
+  if (!el) return;
+  const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  el.textContent += '[' + t + '] ' + msg + '\n';
+  el.scrollTop = el.scrollHeight;
+  console.log(msg);
+}
+
 document.getElementById('connBtn').addEventListener('click', async () => {
   if (device && device.gatt.connected) {
     manualDisconnect = true;          // don't auto-reconnect after a deliberate disconnect
@@ -341,10 +357,12 @@ document.getElementById('connBtn').addEventListener('click', async () => {
   }
   try {
     manualDisconnect = false;
+    dbg('Requesting device chooser…');
     const dev = await navigator.bluetooth.requestDevice({
       filters: [{ name: 'AQ-Monitor' }],
       optionalServices: [SERVICE]
     });
+    dbg('Picked: ' + (dev.name || '(no name)') + '  id=' + dev.id.slice(0, 8) + '…');
     await bindDevice(dev);
     await connectGatt();
   } catch (e) {
@@ -379,17 +397,22 @@ async function connectGatt(maxAttempts = 4) {
       try {
         document.getElementById('connText').textContent =
           attempt === 1 ? 'Connecting…' : 'Connecting… (try ' + attempt + ')';
+        dbg('Attempt ' + attempt + ': gatt.connect()…');
         // Make sure we're not sitting on a half-open link from a previous attempt
         if (device.gatt.connected) { try { device.gatt.disconnect(); } catch {} await sleep(200); }
         const server = await device.gatt.connect();
+        dbg('  connected=' + device.gatt.connected + ', settling…');
         await sleep(300);          // let the Android BLE stack settle before discovery
+        dbg('  getPrimaryService()… (connected=' + device.gatt.connected + ')');
         const svc = await server.getPrimaryService(SERVICE);
+        dbg('  service OK, discovering characteristics…');
         await wireCharacteristics(svc);
+        dbg('  ✓ fully connected');
         setConnected(true);
         return;                    // success
       } catch (e) {
         lastErr = e;
-        console.warn('connect attempt ' + attempt + ' failed: ' + e.message);
+        dbg('  ✗ failed: ' + e.message);
         try { if (device.gatt.connected) device.gatt.disconnect(); } catch {}
         if (attempt < maxAttempts) await sleep(600 * attempt);  // backoff: 0.6s, 1.2s, 1.8s
       }
@@ -402,8 +425,11 @@ async function connectGatt(maxAttempts = 4) {
 
 // Discover characteristics and subscribe. Separated so connectGatt can retry cleanly.
 async function wireCharacteristics(svc) {
+  dbg('    data char…');
   dataChar = await svc.getCharacteristic(DATA_CHAR);
+  dbg('    interval char…');
   intervalChar = await svc.getCharacteristic(INTERVAL_CHAR);
+  dbg('    standby char…');
   standbyChar = await svc.getCharacteristic(STANDBY_CHAR);
 
   await dataChar.startNotifications();
@@ -416,9 +442,9 @@ async function wireCharacteristics(svc) {
     await batteryChar.startNotifications();
     batteryChar.removeEventListener('characteristicvaluechanged', onBattery);
     batteryChar.addEventListener('characteristicvaluechanged', onBattery);
+    dbg('    battery char OK');
   } catch (e) {
-    // Older firmware without the battery characteristic — fall back to JSON battery
-    console.log('No battery characteristic:', e);
+    dbg('    no battery char (old firmware?)');
   }
 
   const iv = await intervalChar.readValue();
@@ -452,6 +478,7 @@ function updateBatteryUI(pct, volts) {
 
 function onDisconnect() {
   if (connecting) return;   // a connect attempt is managing the link; don't interfere
+  dbg('gattserverdisconnected event');
   setConnected(false);
   // Auto-reconnect unless the user pressed Disconnect
   if (!manualDisconnect && device) scheduleReconnect();
@@ -1172,6 +1199,9 @@ function renderMap() {
 updateIntervalDisplay(30);
 updateHistoryMeta();
 updateMetricInfo();
+document.getElementById('dbgClear').addEventListener('click', () => {
+  document.getElementById('dbgLog').textContent = '';
+});
 // Standby draws roughly the idle current (SEN66 stopped + MCU/BLE), ~6 mA
 document.getElementById('standbyEst').textContent =
   'In standby: ~' + formatLife(4500 / 6) + ' estimated';
