@@ -112,6 +112,12 @@
   /* History */
   .chart-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
   #histChart { display: block; width: 100%; height: 220px; }
+  .metric-explain { font-size: 13px; color: var(--text); line-height: 1.55; margin-top: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .metric-explain h4 { margin: 0 0 6px; font-size: 14px; }
+  .metric-explain p { margin: 0; color: var(--mute); }
+  .metric-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; padding: 0 2px; }
+  .metric-legend .lz { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--mute); }
+  .metric-legend .lz i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
   .range-select { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; }
   .range-select button { padding: 5px 9px; font-size: 11px; background: var(--panel2); color: var(--mute); border: 1px solid var(--line); border-radius: 6px; }
   .range-select button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
@@ -264,6 +270,8 @@
       <canvas id="histChart"></canvas>
     </div>
     <div class="empty" id="histEmpty">No history yet. Connect and let it run to collect data.</div>
+    <div class="metric-explain" id="metricExplain"></div>
+    <div class="metric-legend" id="metricLegend"></div>
   </div>
 </div>
 
@@ -678,6 +686,8 @@ function stopGps() {
 
 // ---------- History chart ----------
 let currentMetric = 'co2';
+let selectedChartT = null;   // timestamp of the tapped point, or null
+let chartState = null;       // saved geometry for hit-testing taps
 const metricLabels = { co2:'CO₂ (ppm)', pm25:'PM2.5 (µg/m³)', pm10:'PM10 (µg/m³)', voc:'VOC Index', nox:'NOx Index', temp:'Temp (°C)', hum:'Humidity (%)' };
 
 // Health zones per metric, ascending by upper bound. Drawn as faint colored bands
@@ -731,11 +741,40 @@ const healthZones = {
   ]
 };
 
+// Short explanation of each metric, shown below the graph
+const metricInfo = {
+  co2: { title: 'CO₂ — Carbon Dioxide (ppm)', text: 'A direct measure of how stuffy the air is and a good proxy for ventilation. Outdoor air sits around 420 ppm. Indoors: under 800 is well-ventilated, 800–1000 is fine, 1000–1500 gets stuffy and can dull concentration, and above 1500 means the room needs fresh air.' },
+  pm25: { title: 'PM2.5 — Fine Particulate Matter (µg/m³)', text: 'Tiny particles 2.5 microns or smaller — smoke, soot, combustion byproducts — small enough to reach deep into the lungs and bloodstream. 0–12 good, 12–35 moderate, 35–55 unhealthy for sensitive groups, 55–150 unhealthy, above 150 hazardous (US EPA breakpoints).' },
+  pm10: { title: 'PM10 — Coarse Particulate Matter (µg/m³)', text: 'Larger particles up to 10 microns — dust, pollen, mold spores. Irritating but mostly filtered by the upper airway. 0–54 good, 54–154 moderate, 154–254 unhealthy, above 254 hazardous.' },
+  voc: { title: 'VOC Index — Volatile Organic Compounds', text: 'Gases off-gassed by cleaning products, paint, furniture, cooking and people. This is a relative index centered on 100 (your recent baseline), not an absolute concentration: under 100 is cleaner than usual, 100–200 moderate, 200–300 elevated, above 300 high. A spike usually means something was just sprayed, opened, or cooked.' },
+  nox: { title: 'NOx Index — Nitrogen Oxides', text: 'Gases from combustion — gas stoves, heaters, traffic fumes. Like VOC it is a relative index, with 1 as the typical resting value: under 20 good, 20–150 moderate, 150–300 elevated, above 300 high. Watch it jump when a gas burner is lit nearby.' },
+  temp: { title: 'Temperature (°C)', text: 'Ambient air temperature. Rough comfort bands: under 16 cold, 16–19 cool, 19–25 comfortable, 25–28 warm, above 28 hot. Note the sensor reads a little high because of self-heating from its own electronics and fan.' },
+  hum: { title: 'Relative Humidity (%)', text: 'How much moisture the air holds relative to its maximum. Under 30% is dry (dries out skin and airways), 30–60% is the comfortable range, 60–70% feels humid, and above 70% raises mold and dust-mite risk.' }
+};
+
+function updateMetricInfo() {
+  const info = metricInfo[currentMetric];
+  const ex = document.getElementById('metricExplain');
+  if (info) ex.innerHTML = '<h4>' + info.title + '</h4><p>' + info.text + '</p>';
+
+  // Build the legend from the health zones
+  const zones = healthZones[currentMetric] || [];
+  let lower = null;
+  const parts = zones.map(z => {
+    const range = (lower === null ? '< ' + z.to : (z.to === Infinity ? '> ' + lower : lower + '–' + z.to));
+    lower = z.to;
+    return '<span class="lz"><i style="background:' + z.color + '"></i>' + z.label + ' (' + range + ')</span>';
+  });
+  document.getElementById('metricLegend').innerHTML = parts.join('');
+}
+
 document.querySelectorAll('#metricSelect button').forEach(b => {
   b.addEventListener('click', () => {
     document.querySelectorAll('#metricSelect button').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     currentMetric = b.dataset.metric;
+    selectedChartT = null;       // clear any tapped point when switching metric
+    updateMetricInfo();
     drawChart();
   });
 });
@@ -806,10 +845,12 @@ function drawChart() {
   empty.style.display = 'none';
 
   // Buffer sized to the displayed size × device pixel ratio for crisp lines.
-  // CSS (#histChart) constrains the *display* size to the container width.
+  // Display width follows the container (CSS width:100%); height grows in landscape.
   const dpr = window.devicePixelRatio || 1;
   const W = canvas.clientWidth || canvas.parentElement.clientWidth || 320;
-  const H = 220;
+  const landscape = window.innerWidth > window.innerHeight;
+  const H = landscape ? Math.max(220, Math.min(window.innerHeight - 150, 380)) : 220;
+  canvas.style.height = H + 'px';        // override the CSS fixed height
   canvas.width = W * dpr;
   canvas.height = H * dpr;
   const ctx = canvas.getContext('2d');
@@ -905,7 +946,78 @@ function drawChart() {
   // Title + point count
   ctx.fillStyle = '#8b949e';
   ctx.fillText(metricLabels[currentMetric] + '  (' + rows.length + ' pts)', pad.l, 10);
+
+  // Save geometry for tap hit-testing
+  chartState = { rows, t0, tspan, min, range, pad, plotW, plotH, W, H, px, py, longSpan };
+
+  // ---- Tapped point marker + tooltip ----
+  if (selectedChartT !== null && rows.length) {
+    // Find the row nearest the selected timestamp
+    let nearest = rows[0], best = Infinity;
+    for (const h of rows) {
+      const d = Math.abs(h.t - selectedChartT);
+      if (d < best) { best = d; nearest = h; }
+    }
+    const x = px(nearest.t), y = py(nearest[currentMetric]);
+
+    // Vertical guide line
+    ctx.strokeStyle = 'rgba(230,237,243,0.35)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, H - pad.b); ctx.stroke();
+
+    // Point dot
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#4da3ff'; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = '#fff'; ctx.stroke();
+
+    // Tooltip
+    const val = nearest[currentMetric];
+    const valStr = (Math.abs(val) < 10 ? val.toFixed(1) : Math.round(val)) + '';
+    const timeStr = new Date(nearest.t).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    ctx.font = 'bold 12px -apple-system, sans-serif';
+    const w1 = ctx.measureText(valStr).width;
+    ctx.font = '10px -apple-system, sans-serif';
+    const w2 = ctx.measureText(timeStr).width;
+    const boxW = Math.max(w1, w2) + 16;
+    const boxH = 34;
+    let bx = x + 8;
+    if (bx + boxW > W - pad.r) bx = x - boxW - 8;   // flip if near right edge
+    let by = Math.max(pad.t, Math.min(y - boxH - 6, H - pad.b - boxH));
+    ctx.fillStyle = 'rgba(20,26,34,0.95)';
+    ctx.strokeStyle = '#2a3340';
+    ctx.lineWidth = 1;
+    if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(bx, by, boxW, boxH, 6); ctx.fill(); ctx.stroke(); }
+    else { ctx.fillRect(bx, by, boxW, boxH); ctx.strokeRect(bx, by, boxW, boxH); }
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#e6edf3'; ctx.font = 'bold 12px -apple-system, sans-serif';
+    ctx.fillText(valStr, bx + 8, by + 15);
+    ctx.fillStyle = '#8b949e'; ctx.font = '10px -apple-system, sans-serif';
+    ctx.fillText(timeStr, bx + 8, by + 28);
+  }
 }
+
+// ---- Tap-to-inspect: tap the chart to read a value; tap elsewhere to clear ----
+(function setupChartTaps() {
+  const canvas = document.getElementById('histChart');
+  canvas.addEventListener('click', (e) => {
+    if (!chartState) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;   // CSS pixels, matches our drawing space
+    const { t0, tspan, pad, plotW } = chartState;
+    // Map x back to a timestamp, clamp into the plot area
+    const frac = Math.min(1, Math.max(0, (x - pad.l) / plotW));
+    selectedChartT = t0 + frac * tspan;
+    drawChart();
+    e.stopPropagation();
+  });
+  // Tapping anywhere off the chart clears the marker
+  document.addEventListener('click', (e) => {
+    if (selectedChartT !== null && e.target !== canvas) {
+      selectedChartT = null;
+      if (document.getElementById('historyTab').classList.contains('active')) drawChart();
+    }
+  });
+})();
 
 // ---------- Map ----------
 let map = null;
@@ -1021,9 +1133,34 @@ function renderMap() {
 // ---------- Init ----------
 updateIntervalDisplay(30);
 updateHistoryMeta();
+updateMetricInfo();
 // Standby draws roughly the idle current (SEN66 stopped + MCU/BLE), ~6 mA
 document.getElementById('standbyEst').textContent =
   'In standby: ~' + formatLife(4500 / 6) + ' estimated';
+
+// Battery poll fallback: read the battery characteristic every 5 s while connected.
+// This guarantees the 5-second cadence even if notifications are flaky, and is
+// independent of the measurement interval.
+setInterval(async () => {
+  if (batteryChar && device && device.gatt && device.gatt.connected) {
+    try {
+      const dv = await batteryChar.readValue();
+      if (dv.byteLength >= 3) {
+        const pct = dv.getUint8(0);
+        const mv = dv.getUint8(1) | (dv.getUint8(2) << 8);
+        updateBatteryUI(pct, mv / 1000);
+      }
+    } catch (e) { /* not connected / busy — ignore */ }
+  }
+}, 5000);
+
+// Redraw chart on rotation so it regrows to the new screen size
+window.addEventListener('orientationchange', () => {
+  setTimeout(() => {
+    if (document.getElementById('historyTab').classList.contains('active')) drawChart();
+  }, 250);
+});
+
 if (!navigator.bluetooth) {
   alert('Web Bluetooth not supported in this browser. Use Chrome on Android, or the Bluefy browser on iOS.');
 } else {
