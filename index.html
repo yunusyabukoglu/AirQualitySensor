@@ -330,6 +330,8 @@ function saveHistory() {
 const LAST_DEVICE_KEY = 'aq_last_device_id';
 let manualDisconnect = false;
 let reconnectTimer = null;
+let connecting = false;   // guard so manual + background connects don't race each other
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 document.getElementById('connBtn').addEventListener('click', async () => {
   if (device && device.gatt.connected) {
@@ -347,7 +349,11 @@ document.getElementById('connBtn').addEventListener('click', async () => {
     await connectGatt();
   } catch (e) {
     console.error(e);
-    if (e.name !== 'NotFoundError') alert('Connection failed or cancelled: ' + e.message);
+    if (e.name === 'NotFoundError') return;   // user dismissed the chooser
+    const gatt = /GATT|disconnected|services/i.test(e.message || '');
+    alert(gatt
+      ? "Couldn't hold the connection after several tries. Power-cycle the monitor (off/on), and if it still fails, toggle the phone's Bluetooth off and on, then Connect again."
+      : 'Connection failed or cancelled: ' + e.message);
   }
 });
 
@@ -359,11 +365,43 @@ async function bindDevice(dev) {
   try { localStorage.setItem(LAST_DEVICE_KEY, device.id); } catch {}
 }
 
-// Connect GATT and wire up characteristics (used for both first connect and reconnect)
-async function connectGatt() {
-  const server = await device.gatt.connect();
-  const svc = await server.getPrimaryService(SERVICE);
+// Connect GATT and wire up characteristics, with retry.
+// Android Chrome frequently drops the very first GATT connection ("GATT Server is
+// disconnected. Cannot retrieve services"), so we attempt several times with backoff,
+// fully disconnecting between tries to start each attempt clean.
+async function connectGatt(maxAttempts = 4) {
+  if (connecting) return;          // already in a connect attempt
+  connecting = true;
+  clearTimeout(reconnectTimer);    // stop any background reconnect from fighting us
+  let lastErr;
+  try {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        document.getElementById('connText').textContent =
+          attempt === 1 ? 'Connecting…' : 'Connecting… (try ' + attempt + ')';
+        // Make sure we're not sitting on a half-open link from a previous attempt
+        if (device.gatt.connected) { try { device.gatt.disconnect(); } catch {} await sleep(200); }
+        const server = await device.gatt.connect();
+        await sleep(300);          // let the Android BLE stack settle before discovery
+        const svc = await server.getPrimaryService(SERVICE);
+        await wireCharacteristics(svc);
+        setConnected(true);
+        return;                    // success
+      } catch (e) {
+        lastErr = e;
+        console.warn('connect attempt ' + attempt + ' failed: ' + e.message);
+        try { if (device.gatt.connected) device.gatt.disconnect(); } catch {}
+        if (attempt < maxAttempts) await sleep(600 * attempt);  // backoff: 0.6s, 1.2s, 1.8s
+      }
+    }
+    throw lastErr;
+  } finally {
+    connecting = false;
+  }
+}
 
+// Discover characteristics and subscribe. Separated so connectGatt can retry cleanly.
+async function wireCharacteristics(svc) {
   dataChar = await svc.getCharacteristic(DATA_CHAR);
   intervalChar = await svc.getCharacteristic(INTERVAL_CHAR);
   standbyChar = await svc.getCharacteristic(STANDBY_CHAR);
@@ -390,8 +428,6 @@ async function connectGatt() {
 
   const sb = await standbyChar.readValue();
   setStandbyUI(sb.getUint8(0) !== 0);
-
-  setConnected(true);
 }
 
 // Dedicated battery packet: [pct, mV_lo, mV_hi]
@@ -415,6 +451,7 @@ function updateBatteryUI(pct, volts) {
 }
 
 function onDisconnect() {
+  if (connecting) return;   // a connect attempt is managing the link; don't interfere
   setConnected(false);
   // Auto-reconnect unless the user pressed Disconnect
   if (!manualDisconnect && device) scheduleReconnect();
@@ -422,9 +459,10 @@ function onDisconnect() {
 
 function scheduleReconnect(tries = 0) {
   clearTimeout(reconnectTimer);
-  if (manualDisconnect || !device) return;
+  if (manualDisconnect || !device || connecting) return;
   document.getElementById('connText').textContent = 'Reconnecting…';
   reconnectTimer = setTimeout(async () => {
+    if (connecting) return;
     try {
       await connectGatt();
     } catch (e) {
