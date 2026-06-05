@@ -110,6 +110,14 @@
 
   /* History */
   .chart-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+  #histChart { display: block; width: 100%; height: 220px; }
+  .range-select { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; }
+  .range-select button { padding: 5px 9px; font-size: 11px; background: var(--panel2); color: var(--mute); border: 1px solid var(--line); border-radius: 6px; }
+  .range-select button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .custom-range { display: none; gap: 6px; align-items: center; margin-bottom: 10px; }
+  .custom-range.show { display: flex; }
+  .custom-range input { width: 70px; padding: 6px 8px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
+  .custom-range select { padding: 6px 8px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
   .metric-select { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
   .metric-select button { padding: 6px 12px; font-size: 12px; background: var(--panel2); color: var(--mute); border: 1px solid var(--line); }
   .metric-select button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
@@ -182,7 +190,7 @@
     <div class="control-group">
       <h3>Measurement Interval</h3>
       <div class="slider-row">
-        <input type="range" id="intervalSlider" min="10" max="1800" step="10" value="30">
+        <input type="range" id="intervalSlider" min="1" max="1800" step="1" value="30">
         <div class="interval-display" id="intervalDisplay">30s</div>
       </div>
       <div class="estimate">
@@ -215,12 +223,37 @@
       <button data-metric="temp">Temp</button>
       <button data-metric="hum">Humidity</button>
     </div>
+    <div class="range-select" id="rangeSelect">
+      <button data-sec="10">10s</button>
+      <button data-sec="30">30s</button>
+      <button data-sec="60">1m</button>
+      <button data-sec="300">5m</button>
+      <button data-sec="900">15m</button>
+      <button data-sec="1800">30m</button>
+      <button data-sec="3600">1h</button>
+      <button data-sec="7200">2h</button>
+      <button data-sec="28800">8h</button>
+      <button data-sec="86400">1d</button>
+      <button data-sec="604800">1w</button>
+      <button data-sec="0" class="active">All</button>
+      <button data-sec="custom">Custom</button>
+    </div>
+    <div class="custom-range" id="customRange">
+      <input type="number" id="customAmount" min="1" value="2" placeholder="amount">
+      <select id="customUnit">
+        <option value="1">seconds</option>
+        <option value="60">minutes</option>
+        <option value="3600" selected>hours</option>
+        <option value="86400">days</option>
+      </select>
+      <button class="secondary" id="applyCustom" style="padding:6px 12px; font-size:12px;">Apply</button>
+    </div>
     <div class="hist-meta">
       <span id="histCount">0 readings stored</span>
       <button class="secondary" id="clearHistory" style="padding:4px 10px; font-size:11px;">Clear</button>
     </div>
     <div class="chart-wrap">
-      <canvas id="histChart" height="220"></canvas>
+      <canvas id="histChart"></canvas>
     </div>
     <div class="empty" id="histEmpty">No history yet. Connect and let it run to collect data.</div>
   </div>
@@ -277,45 +310,100 @@ function saveHistory() {
 }
 
 // ---------- Connection ----------
+const LAST_DEVICE_KEY = 'aq_last_device_id';
+let manualDisconnect = false;
+let reconnectTimer = null;
+
 document.getElementById('connBtn').addEventListener('click', async () => {
   if (device && device.gatt.connected) {
+    manualDisconnect = true;          // don't auto-reconnect after a deliberate disconnect
     device.gatt.disconnect();
     return;
   }
   try {
-    device = await navigator.bluetooth.requestDevice({
+    manualDisconnect = false;
+    const dev = await navigator.bluetooth.requestDevice({
       filters: [{ name: 'AQ-Monitor' }],
       optionalServices: [SERVICE]
     });
-    device.addEventListener('gattserverdisconnected', onDisconnect);
-    const server = await device.gatt.connect();
-    const svc = await server.getPrimaryService(SERVICE);
-
-    dataChar = await svc.getCharacteristic(DATA_CHAR);
-    intervalChar = await svc.getCharacteristic(INTERVAL_CHAR);
-    standbyChar = await svc.getCharacteristic(STANDBY_CHAR);
-
-    await dataChar.startNotifications();
-    dataChar.addEventListener('characteristicvaluechanged', onData);
-
-    // Read current interval & standby from device
-    const iv = await intervalChar.readValue();
-    const ivSec = iv.getUint16(0, true);
-    document.getElementById('intervalSlider').value = ivSec;
-    updateIntervalDisplay(ivSec);
-
-    const sb = await standbyChar.readValue();
-    setStandbyUI(sb.getUint8(0) !== 0);
-
-    setConnected(true);
+    await bindDevice(dev);
+    await connectGatt();
   } catch (e) {
     console.error(e);
-    alert('Connection failed or cancelled: ' + e.message);
+    if (e.name !== 'NotFoundError') alert('Connection failed or cancelled: ' + e.message);
   }
 });
 
+// Attach a device object and remember it for later auto-reconnect
+async function bindDevice(dev) {
+  device = dev;
+  device.removeEventListener('gattserverdisconnected', onDisconnect);
+  device.addEventListener('gattserverdisconnected', onDisconnect);
+  try { localStorage.setItem(LAST_DEVICE_KEY, device.id); } catch {}
+}
+
+// Connect GATT and wire up characteristics (used for both first connect and reconnect)
+async function connectGatt() {
+  const server = await device.gatt.connect();
+  const svc = await server.getPrimaryService(SERVICE);
+
+  dataChar = await svc.getCharacteristic(DATA_CHAR);
+  intervalChar = await svc.getCharacteristic(INTERVAL_CHAR);
+  standbyChar = await svc.getCharacteristic(STANDBY_CHAR);
+
+  await dataChar.startNotifications();
+  dataChar.removeEventListener('characteristicvaluechanged', onData);
+  dataChar.addEventListener('characteristicvaluechanged', onData);
+
+  const iv = await intervalChar.readValue();
+  const ivSec = iv.getUint16(0, true);
+  document.getElementById('intervalSlider').value = ivSec;
+  updateIntervalDisplay(ivSec);
+
+  const sb = await standbyChar.readValue();
+  setStandbyUI(sb.getUint8(0) !== 0);
+
+  setConnected(true);
+}
+
 function onDisconnect() {
   setConnected(false);
+  // Auto-reconnect unless the user pressed Disconnect
+  if (!manualDisconnect && device) scheduleReconnect();
+}
+
+function scheduleReconnect(tries = 0) {
+  clearTimeout(reconnectTimer);
+  if (manualDisconnect || !device) return;
+  document.getElementById('connText').textContent = 'Reconnecting…';
+  reconnectTimer = setTimeout(async () => {
+    try {
+      await connectGatt();
+    } catch (e) {
+      if (tries < 30) scheduleReconnect(tries + 1);   // keep trying ~1 min
+      else document.getElementById('connText').textContent = 'Disconnected';
+    }
+  }, 2000);
+}
+
+// On page load, try to silently reconnect to the last-used device (no prompt)
+async function tryRestoreConnection() {
+  if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return;
+  try {
+    const devices = await navigator.bluetooth.getDevices();
+    const lastId = localStorage.getItem(LAST_DEVICE_KEY);
+    const dev = devices.find(d => d.id === lastId) || devices.find(d => d.name === 'AQ-Monitor');
+    if (!dev) return;
+    await bindDevice(dev);
+    manualDisconnect = false;
+    try {
+      await connectGatt();           // works if device is advertising and permission persists
+    } catch {
+      scheduleReconnect();           // otherwise keep trying in the background
+    }
+  } catch (e) {
+    console.log('restore failed:', e);
+  }
 }
 
 function setConnected(c) {
@@ -512,6 +600,32 @@ document.querySelectorAll('#metricSelect button').forEach(b => {
   });
 });
 
+// Time-range selector
+document.querySelectorAll('#rangeSelect button').forEach(b => {
+  b.addEventListener('click', () => {
+    const customBox = document.getElementById('customRange');
+    if (b.dataset.sec === 'custom') {
+      customBox.classList.toggle('show');
+      return;
+    }
+    document.querySelectorAll('#rangeSelect button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    customBox.classList.remove('show');
+    rangeSec = parseInt(b.dataset.sec);
+    drawChart();
+  });
+});
+
+document.getElementById('applyCustom').addEventListener('click', () => {
+  const amount = parseFloat(document.getElementById('customAmount').value) || 0;
+  const unit = parseInt(document.getElementById('customUnit').value);
+  if (amount <= 0) return;
+  rangeSec = Math.round(amount * unit);
+  document.querySelectorAll('#rangeSelect button').forEach(x => x.classList.remove('active'));
+  document.querySelector('#rangeSelect button[data-sec="custom"]').classList.add('active');
+  drawChart();
+});
+
 document.getElementById('clearHistory').addEventListener('click', () => {
   if (confirm('Clear all stored history?')) {
     history = []; saveHistory(); updateHistoryMeta(); drawChart();
@@ -522,23 +636,39 @@ function updateHistoryMeta() {
   document.getElementById('histCount').textContent = history.length + ' readings stored';
 }
 
+let rangeSec = 0;  // 0 = show all history
+
+function getWindowedRows() {
+  let rows = history.filter(h => h[currentMetric] !== undefined && h[currentMetric] !== null);
+  if (rangeSec > 0) {
+    const cutoff = Date.now() - rangeSec * 1000;
+    rows = rows.filter(h => h.t >= cutoff);
+  }
+  return rows;
+}
+
 function drawChart() {
   updateHistoryMeta();
   const empty = document.getElementById('histEmpty');
   const canvas = document.getElementById('histChart');
-  const data = history.map(h => h[currentMetric]).filter(v => v !== undefined && v !== null);
+  const rows = getWindowedRows();
+  const data = rows.map(h => h[currentMetric]);
 
   if (data.length < 2) {
     empty.style.display = 'block';
+    empty.textContent = history.length === 0
+      ? 'No history yet. Connect and let it run to collect data.'
+      : 'Not enough readings in this time window — try a longer range.';
     const c = canvas.getContext('2d');
     c.clearRect(0, 0, canvas.width, canvas.height);
     return;
   }
   empty.style.display = 'none';
 
-  // Size the canvas to its display width, scaled for crisp lines on hi-dpi screens
+  // Buffer sized to the displayed size × device pixel ratio for crisp lines.
+  // CSS (#histChart) constrains the *display* size to the container width.
   const dpr = window.devicePixelRatio || 1;
-  const W = canvas.clientWidth || 320;
+  const W = canvas.clientWidth || canvas.parentElement.clientWidth || 320;
   const H = 220;
   canvas.width = W * dpr;
   canvas.height = H * dpr;
@@ -551,9 +681,9 @@ function drawChart() {
   const plotH = H - pad.t - pad.b;
 
   let min = Math.min(...data), max = Math.max(...data);
-  if (min === max) { min -= 1; max += 1; }       // avoid flat-line divide-by-zero
-  const pday = (max - min) * 0.1;                  // 10% padding top/bottom
-  min -= pday; max += pday;
+  if (min === max) { min -= 1; max += 1; }
+  const padv = (max - min) * 0.1;
+  min -= padv; max += padv;
   const range = max - min;
 
   // Grid lines + Y labels
@@ -568,33 +698,44 @@ function drawChart() {
     ctx.fillText(val.toFixed(range < 10 ? 1 : 0), 4, y + 3);
   }
 
-  // X labels: first and last timestamp
-  const tFirst = new Date(history[0].t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const tLast  = new Date(history[history.length - 1].t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  ctx.fillText(tFirst, pad.l, H - 8);
-  ctx.fillText(tLast, W - pad.r - ctx.measureText(tLast).width, H - 8);
+  // X axis: position points by actual time so gaps are proportional
+  const t0 = rows[0].t, t1 = rows[rows.length - 1].t;
+  const tspan = (t1 - t0) || 1;
+  const longSpan = tspan > 86400000; // > 1 day -> show dates
+  const fmt = (t) => {
+    const d = new Date(t);
+    return longSpan
+      ? d.toLocaleDateString([], { month: 'numeric', day: 'numeric' })
+      : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+  ctx.fillText(fmt(t0), pad.l, H - 8);
+  const lastLabel = fmt(t1);
+  ctx.fillText(lastLabel, W - pad.r - ctx.measureText(lastLabel).width, H - 8);
 
-  // The line
-  const px = i => pad.l + plotW * i / (data.length - 1);
-  const py = v => pad.t + plotH * (1 - (v - min) / range);
+  const px = (t) => pad.l + plotW * (t - t0) / tspan;
+  const py = (v) => pad.t + plotH * (1 - (v - min) / range);
 
+  // Line
   ctx.beginPath();
-  data.forEach((v, i) => { i === 0 ? ctx.moveTo(px(i), py(v)) : ctx.lineTo(px(i), py(v)); });
+  rows.forEach((h, i) => {
+    const x = px(h.t), y = py(h[currentMetric]);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
   ctx.strokeStyle = '#4da3ff';
   ctx.lineWidth = 2;
   ctx.lineJoin = 'round';
   ctx.stroke();
 
   // Fill under the line
-  ctx.lineTo(px(data.length - 1), H - pad.b);
-  ctx.lineTo(px(0), H - pad.b);
+  ctx.lineTo(px(t1), H - pad.b);
+  ctx.lineTo(px(t0), H - pad.b);
   ctx.closePath();
   ctx.fillStyle = 'rgba(77,163,255,0.12)';
   ctx.fill();
 
-  // Title
+  // Title + point count
   ctx.fillStyle = '#8b949e';
-  ctx.fillText(metricLabels[currentMetric], pad.l, 10);
+  ctx.fillText(metricLabels[currentMetric] + '  (' + rows.length + ' pts)', pad.l, 10);
 }
 
 // ---------- Map ----------
@@ -693,6 +834,9 @@ updateIntervalDisplay(30);
 updateHistoryMeta();
 if (!navigator.bluetooth) {
   alert('Web Bluetooth not supported in this browser. Use Chrome on Android, or the Bluefy browser on iOS.');
+} else {
+  // Try to silently re-establish the connection to the last device after a reload
+  tryRestoreConnection();
 }
 
 // Register service worker so the app works offline after the first load
