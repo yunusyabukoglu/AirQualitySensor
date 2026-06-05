@@ -7,6 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0e1116">
 <link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <title>AQ Monitor</title>
 <style>
   :root {
@@ -114,6 +115,14 @@
   .metric-select button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
   .hist-meta { font-size: 12px; color: var(--mute); display: flex; justify-content: space-between; margin-bottom: 10px; }
   .empty { text-align: center; color: var(--mute); padding: 40px 20px; font-size: 14px; }
+
+  /* Map */
+  #map { height: 420px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel2); }
+  .leaflet-popup-content { font-size: 12px; line-height: 1.5; }
+  #gpsBtn.active { background: var(--good); color: #fff; }
+  #mapLegend { display: flex; gap: 8px; align-items: center; }
+  #mapLegend .lg { display: inline-flex; align-items: center; gap: 3px; }
+  #mapLegend .lg i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 </style>
 </head>
 <body>
@@ -182,6 +191,15 @@
       </div>
       <button class="standby-btn secondary" id="standbyBtn">Enter Standby</button>
     </div>
+
+    <div class="control-group">
+      <h3>Location Tracking</h3>
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span style="font-size:13px; color:var(--mute);">Tag readings with GPS location</span>
+        <button class="secondary" id="gpsBtn">Off</button>
+      </div>
+      <div style="font-size:12px; color:var(--mute); margin-top:10px;" id="gpsStatus">Location off — readings won't be mapped.</div>
+    </div>
   </div>
 </div>
 
@@ -208,12 +226,33 @@
   </div>
 </div>
 
+<!-- MAP TAB -->
+<div class="tab" id="mapTab">
+  <div class="content">
+    <div class="metric-select" id="mapMetricSelect">
+      <button data-metric="pm25" class="active">PM2.5</button>
+      <button data-metric="co2">CO₂</button>
+      <button data-metric="pm10">PM10</button>
+      <button data-metric="voc">VOC</button>
+      <button data-metric="nox">NOx</button>
+    </div>
+    <div class="hist-meta">
+      <span id="mapCount">0 located readings</span>
+      <span id="mapLegend"></span>
+    </div>
+    <div id="map"></div>
+    <div class="empty" id="mapEmpty">No located readings yet. Turn on Location Tracking in the Live tab and move around to build a map.</div>
+  </div>
+</div>
+
 <!-- TAB BAR -->
 <div class="tabbar">
   <button class="active" data-tab="liveTab"><span class="ico">📊</span>Live</button>
   <button data-tab="historyTab"><span class="ico">📈</span>History</button>
+  <button data-tab="mapTab"><span class="ico">🗺️</span>Map</button>
 </div>
 
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 // ---------- BLE UUIDs (must match firmware) ----------
 const SERVICE      = 'e2e87a00-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
@@ -295,11 +334,19 @@ function onData(event) {
 
   updateLive(d);
   if (d.co2 !== undefined) {
-    history.push({ t: Date.now(), ...d });
+    const entry = { t: Date.now(), ...d };
+    // Attach current GPS location if tracking is on and we have a fix
+    if (gpsTracking && lastPosition) {
+      entry.lat = lastPosition.coords.latitude;
+      entry.lon = lastPosition.coords.longitude;
+      entry.acc = Math.round(lastPosition.coords.accuracy);
+    }
+    history.push(entry);
     if (history.length > MAX_POINTS) history.shift();
     saveHistory();
     updateHistoryMeta();
     if (document.getElementById('historyTab').classList.contains('active')) drawChart();
+    if (document.getElementById('mapTab').classList.contains('active')) renderMap();
   }
 }
 
@@ -403,8 +450,54 @@ document.querySelectorAll('.tabbar button').forEach(b => {
     b.classList.add('active');
     document.getElementById(b.dataset.tab).classList.add('active');
     if (b.dataset.tab === 'historyTab') drawChart();
+    if (b.dataset.tab === 'mapTab') { initMap(); renderMap(); }
   });
 });
+
+// ---------- Location tracking ----------
+let gpsTracking = false;
+let gpsWatchId = null;
+let lastPosition = null;
+
+document.getElementById('gpsBtn').addEventListener('click', () => {
+  if (gpsTracking) stopGps();
+  else startGps();
+});
+
+function startGps() {
+  if (!navigator.geolocation) {
+    document.getElementById('gpsStatus').textContent = 'This browser has no geolocation support.';
+    return;
+  }
+  gpsWatchId = navigator.geolocation.watchPosition(
+    (pos) => {
+      lastPosition = pos;
+      const acc = Math.round(pos.coords.accuracy);
+      document.getElementById('gpsStatus').textContent =
+        `Tracking — accuracy ±${acc} m. Readings are being tagged with location.`;
+    },
+    (err) => {
+      document.getElementById('gpsStatus').textContent = 'Location error: ' + err.message;
+      stopGps();
+    },
+    { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+  );
+  gpsTracking = true;
+  const btn = document.getElementById('gpsBtn');
+  btn.textContent = 'On';
+  btn.classList.add('active');
+  document.getElementById('gpsStatus').textContent = 'Acquiring GPS fix…';
+}
+
+function stopGps() {
+  if (gpsWatchId !== null) navigator.geolocation.clearWatch(gpsWatchId);
+  gpsWatchId = null;
+  gpsTracking = false;
+  const btn = document.getElementById('gpsBtn');
+  btn.textContent = 'Off';
+  btn.classList.remove('active');
+  document.getElementById('gpsStatus').textContent = "Location off — readings won't be mapped.";
+}
 
 // ---------- History chart ----------
 let currentMetric = 'co2';
@@ -502,6 +595,97 @@ function drawChart() {
   // Title
   ctx.fillStyle = '#8b949e';
   ctx.fillText(metricLabels[currentMetric], pad.l, 10);
+}
+
+// ---------- Map ----------
+let map = null;
+let mapLayer = null;
+let mapMetric = 'pm25';
+
+// Color thresholds per metric: [limit, color] ascending. Last is the "worst" bucket.
+const colorScales = {
+  pm25: [[12,'#3fb950'],[35,'#d29922'],[55,'#f0883e'],[Infinity,'#f85149']],
+  pm10: [[54,'#3fb950'],[154,'#d29922'],[254,'#f0883e'],[Infinity,'#f85149']],
+  co2:  [[800,'#3fb950'],[1200,'#d29922'],[2000,'#f0883e'],[Infinity,'#f85149']],
+  voc:  [[150,'#3fb950'],[250,'#d29922'],[400,'#f0883e'],[Infinity,'#f85149']],
+  nox:  [[20,'#3fb950'],[150,'#d29922'],[300,'#f0883e'],[Infinity,'#f85149']]
+};
+
+function colorFor(metric, val) {
+  const scale = colorScales[metric] || colorScales.pm25;
+  for (const [limit, color] of scale) if (val <= limit) return color;
+  return '#f85149';
+}
+
+document.querySelectorAll('#mapMetricSelect button').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#mapMetricSelect button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    mapMetric = b.dataset.metric;
+    renderMap();
+  });
+});
+
+function initMap() {
+  if (map) { setTimeout(() => map.invalidateSize(), 100); return; }
+  if (typeof L === 'undefined') {
+    document.getElementById('mapEmpty').textContent =
+      'Map library could not load — you appear to be offline. Connect to the internet once to view the map (your location data is still being saved).';
+    document.getElementById('mapEmpty').style.display = 'block';
+    return;
+  }
+  map = L.map('map');
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '© OpenStreetMap'
+  }).addTo(map);
+  map.setView([41.95, -87.94], 13); // default view; will recenter on data
+}
+
+function renderMap() {
+  const located = history.filter(h => h.lat !== undefined && h.lon !== undefined);
+  document.getElementById('mapCount').textContent = located.length + ' located readings';
+
+  // Legend
+  const lbl = { pm25:'PM2.5', pm10:'PM10', co2:'CO₂', voc:'VOC', nox:'NOx' }[mapMetric];
+  document.getElementById('mapLegend').innerHTML =
+    `<span class="lg"><i style="background:#3fb950"></i>good</span>` +
+    `<span class="lg"><i style="background:#d29922"></i>mod</span>` +
+    `<span class="lg"><i style="background:#f85149"></i>poor</span>`;
+
+  const empty = document.getElementById('mapEmpty');
+  if (!map) { empty.style.display = 'block'; return; }
+  if (located.length === 0) {
+    empty.style.display = 'block';
+    empty.textContent = 'No located readings yet. Turn on Location Tracking in the Live tab and move around to build a map.';
+    if (mapLayer) { mapLayer.clearLayers(); }
+    return;
+  }
+  empty.style.display = 'none';
+
+  if (mapLayer) mapLayer.clearLayers();
+  else mapLayer = L.layerGroup().addTo(map);
+
+  const latlngs = [];
+  located.forEach(h => {
+    const val = h[mapMetric];
+    if (val === undefined) return;
+    const color = colorFor(mapMetric, val);
+    latlngs.push([h.lat, h.lon]);
+    L.circleMarker([h.lat, h.lon], {
+      radius: 7, color: '#000', weight: 1, fillColor: color, fillOpacity: 0.85
+    }).bindPopup(
+      `<b>${lbl}: ${Math.round(val)}</b><br>` +
+      `CO₂ ${h.co2} ppm · PM2.5 ${h.pm25}<br>` +
+      `${new Date(h.t).toLocaleString()}<br>` +
+      `<span style="color:#888">±${h.acc || '?'} m</span>`
+    ).addTo(mapLayer);
+  });
+
+  // Fit map to the data
+  if (latlngs.length) {
+    map.fitBounds(latlngs, { padding: [30, 30], maxZoom: 17 });
+  }
 }
 
 // ---------- Init ----------
