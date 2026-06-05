@@ -196,6 +196,10 @@
         <span style="color:var(--mute); font-size:13px;">s</span>
       </div>
       <div id="intervalPretty" style="font-size:12px; color:var(--mute); margin-top:2px;">= 30 seconds</div>
+      <div style="display:flex; align-items:center; gap:10px; margin-top:10px;">
+        <button id="setIntervalBtn" style="padding:8px 18px;">Set</button>
+        <span id="intervalConfirm" style="font-size:12px; color:var(--mute);"></span>
+      </div>
       <div class="estimate">
         <span class="est-label">Estimated battery life at this interval</span>
         <span class="est-value" id="batteryEstimate">—</span>
@@ -296,8 +300,9 @@ const SERVICE      = 'e2e87a00-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
 const DATA_CHAR    = 'e2e87a01-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
 const INTERVAL_CHAR= 'e2e87a02-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
 const STANDBY_CHAR = 'e2e87a03-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
+const BATTERY_CHAR = 'e2e87a04-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
 
-let device, dataChar, intervalChar, standbyChar;
+let device, dataChar, intervalChar, standbyChar, batteryChar;
 let standbyOn = false;
 
 // ---------- History storage ----------
@@ -359,6 +364,17 @@ async function connectGatt() {
   dataChar.removeEventListener('characteristicvaluechanged', onData);
   dataChar.addEventListener('characteristicvaluechanged', onData);
 
+  // Fast battery characteristic (updates every 5 s, independent of measurement)
+  try {
+    batteryChar = await svc.getCharacteristic(BATTERY_CHAR);
+    await batteryChar.startNotifications();
+    batteryChar.removeEventListener('characteristicvaluechanged', onBattery);
+    batteryChar.addEventListener('characteristicvaluechanged', onBattery);
+  } catch (e) {
+    // Older firmware without the battery characteristic — fall back to JSON battery
+    console.log('No battery characteristic:', e);
+  }
+
   const iv = await intervalChar.readValue();
   const ivSec = iv.getUint16(0, true);
   document.getElementById('intervalSlider').value = ivSec;
@@ -368,6 +384,26 @@ async function connectGatt() {
   setStandbyUI(sb.getUint8(0) !== 0);
 
   setConnected(true);
+}
+
+// Dedicated battery packet: [pct, mV_lo, mV_hi]
+function onBattery(event) {
+  const dv = event.target.value;
+  if (dv.byteLength < 3) return;
+  const pct = dv.getUint8(0);
+  const mv = dv.getUint8(1) | (dv.getUint8(2) << 8);
+  updateBatteryUI(pct, mv / 1000);
+}
+
+// Shared battery UI update (used by both the fast characteristic and the JSON path)
+function updateBatteryUI(pct, volts) {
+  if (pct !== undefined && pct !== null) {
+    document.getElementById('batt').textContent = pct;
+    const fill = document.getElementById('battFill');
+    fill.style.width = pct + '%';
+    fill.style.background = pct > 40 ? 'var(--good)' : pct > 15 ? 'var(--warn)' : 'var(--bad)';
+  }
+  if (volts) document.getElementById('vbat').textContent = volts.toFixed(2) + 'V';
 }
 
 function onDisconnect() {
@@ -447,12 +483,9 @@ function updateLive(d) {
   setText('pm1', d.pm1); setText('pm4', d.pm4);
   setText('voc', Math.round(d.voc)); setText('nox', Math.round(d.nox));
   setText('temp', d.temp?.toFixed(1)); setText('hum', d.hum?.toFixed(0));
-  setText('batt', d.batt); setText('vbat', d.vbat ? d.vbat.toFixed(2) + 'V' : '');
 
-  // Battery bar
-  const fill = document.getElementById('battFill');
-  fill.style.width = (d.batt || 0) + '%';
-  fill.style.background = d.batt > 40 ? 'var(--good)' : d.batt > 15 ? 'var(--warn)' : 'var(--bad)';
+  // Battery (the dedicated 5 s characteristic also updates this; harmless overlap)
+  if (d.batt !== undefined) updateBatteryUI(d.batt, d.vbat);
 
   // CO2 status
   statusDot('co2dot', 'co2status', d.co2,
@@ -506,17 +539,42 @@ async function commitInterval(sec) {
   try { await intervalChar.writeValue(buf); } catch (e) { console.error(e); }
 }
 
-slider.addEventListener('input', () => setIntervalUI(parseInt(slider.value)));
-slider.addEventListener('change', () => commitInterval(setIntervalUI(parseInt(slider.value))));
-
+// Slider and number box are PREVIEW only now — they update the display but do
+// not push to the device until the user presses "Set". This makes the push explicit.
+slider.addEventListener('input', () => { setIntervalUI(parseInt(slider.value)); markUnsent(); });
 intervalInput.addEventListener('input', () => {
   const v = parseInt(intervalInput.value);
-  if (!isNaN(v)) setIntervalUI(v);
+  if (!isNaN(v)) { setIntervalUI(v); markUnsent(); }
 });
-intervalInput.addEventListener('change', () => {
-  const sec = setIntervalUI(parseInt(intervalInput.value) || 30);
-  intervalInput.value = sec;
-  commitInterval(sec);
+
+function markUnsent() {
+  const c = document.getElementById('intervalConfirm');
+  c.textContent = 'not sent yet';
+  c.style.color = 'var(--mute)';
+}
+
+// The Set button commits the value and confirms by reading it back from the device
+document.getElementById('setIntervalBtn').addEventListener('click', async () => {
+  const c = document.getElementById('intervalConfirm');
+  if (!intervalChar) { c.textContent = 'connect first'; c.style.color = 'var(--warn)'; return; }
+  const sec = setIntervalUI(parseInt(slider.value));
+  c.textContent = 'sending…'; c.style.color = 'var(--mute)';
+  try {
+    await commitInterval(sec);
+    // Read it back to confirm the device actually has the new value
+    const rb = await intervalChar.readValue();
+    const got = rb.getUint16(0, true);
+    if (got === sec) {
+      c.textContent = '✓ set to ' + (sec < 60 ? sec + 's' : (sec/60).toFixed(sec%60?1:0) + 'm') + ' on device';
+      c.style.color = 'var(--good)';
+    } else {
+      c.textContent = '⚠ device shows ' + got + 's';
+      c.style.color = 'var(--warn)';
+    }
+  } catch (e) {
+    c.textContent = '✗ failed to send';
+    c.style.color = 'var(--bad)';
+  }
 });
 
 // Backwards-compatible alias used elsewhere (e.g. on connect)
@@ -562,9 +620,15 @@ document.querySelectorAll('.tabbar button').forEach(b => {
     document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     document.getElementById(b.dataset.tab).classList.add('active');
-    if (b.dataset.tab === 'historyTab') drawChart();
+    // Defer to the next frame so the tab is laid out and the canvas has a real width
+    if (b.dataset.tab === 'historyTab') requestAnimationFrame(drawChart);
     if (b.dataset.tab === 'mapTab') { initMap(); renderMap(); }
   });
+});
+
+// Redraw the chart on resize/orientation change if it's the active tab
+window.addEventListener('resize', () => {
+  if (document.getElementById('historyTab').classList.contains('active')) drawChart();
 });
 
 // ---------- Location tracking ----------
@@ -615,6 +679,57 @@ function stopGps() {
 // ---------- History chart ----------
 let currentMetric = 'co2';
 const metricLabels = { co2:'CO₂ (ppm)', pm25:'PM2.5 (µg/m³)', pm10:'PM10 (µg/m³)', voc:'VOC Index', nox:'NOx Index', temp:'Temp (°C)', hum:'Humidity (%)' };
+
+// Health zones per metric, ascending by upper bound. Drawn as faint colored bands
+// behind the line so you can see at a glance whether a reading is in a good/bad range.
+// {to: upperBound, color, label}. The last band uses Infinity.
+const healthZones = {
+  co2: [
+    { to: 600,  color: '#2ea043', label: 'fresh' },
+    { to: 800,  color: '#3fb950', label: 'good' },
+    { to: 1000, color: '#d29922', label: 'moderate' },
+    { to: 1500, color: '#f0883e', label: 'poor' },
+    { to: Infinity, color: '#f85149', label: 'unhealthy' }
+  ],
+  pm25: [
+    { to: 12,  color: '#3fb950', label: 'good' },
+    { to: 35,  color: '#d29922', label: 'moderate' },
+    { to: 55,  color: '#f0883e', label: 'unhealthy (sensitive)' },
+    { to: 150, color: '#f85149', label: 'unhealthy' },
+    { to: Infinity, color: '#a371f7', label: 'hazardous' }
+  ],
+  pm10: [
+    { to: 54,  color: '#3fb950', label: 'good' },
+    { to: 154, color: '#d29922', label: 'moderate' },
+    { to: 254, color: '#f0883e', label: 'unhealthy' },
+    { to: Infinity, color: '#f85149', label: 'hazardous' }
+  ],
+  voc: [
+    { to: 100, color: '#3fb950', label: 'clean' },
+    { to: 200, color: '#d29922', label: 'moderate' },
+    { to: 300, color: '#f0883e', label: 'elevated' },
+    { to: Infinity, color: '#f85149', label: 'high' }
+  ],
+  nox: [
+    { to: 20,  color: '#3fb950', label: 'good' },
+    { to: 150, color: '#d29922', label: 'moderate' },
+    { to: 300, color: '#f0883e', label: 'elevated' },
+    { to: Infinity, color: '#f85149', label: 'high' }
+  ],
+  temp: [
+    { to: 16, color: '#388bfd', label: 'cold' },
+    { to: 19, color: '#39c5cf', label: 'cool' },
+    { to: 25, color: '#3fb950', label: 'comfortable' },
+    { to: 28, color: '#d29922', label: 'warm' },
+    { to: Infinity, color: '#f85149', label: 'hot' }
+  ],
+  hum: [
+    { to: 30, color: '#d29922', label: 'dry' },
+    { to: 60, color: '#3fb950', label: 'comfortable' },
+    { to: 70, color: '#d29922', label: 'humid' },
+    { to: Infinity, color: '#f85149', label: 'too humid' }
+  ]
+};
 
 document.querySelectorAll('#metricSelect button').forEach(b => {
   b.addEventListener('click', () => {
@@ -711,6 +826,36 @@ function drawChart() {
   min -= padv; max += padv;
   const range = max - min;
 
+  const py = (v) => pad.t + plotH * (1 - (v - min) / range);
+
+  // ---- Health zone bands (drawn first, behind everything) ----
+  const zones = healthZones[currentMetric];
+  if (zones) {
+    let lower = -Infinity;
+    for (const z of zones) {
+      const bandTop = Math.min(z.to, max);
+      const bandBot = Math.max(lower, min);
+      if (bandTop > bandBot) {
+        const yTop = py(bandTop);
+        const yBot = py(bandBot);
+        ctx.fillStyle = z.color;
+        ctx.globalAlpha = 0.13;
+        ctx.fillRect(pad.l, yTop, plotW, yBot - yTop);
+        ctx.globalAlpha = 1;
+        if (yBot - yTop > 14) {
+          ctx.fillStyle = z.color;
+          ctx.globalAlpha = 0.9;
+          ctx.font = '9px -apple-system, sans-serif';
+          ctx.textAlign = 'right';
+          ctx.fillText(z.label, W - pad.r - 3, (yTop + yBot) / 2 + 3);
+          ctx.textAlign = 'left';
+          ctx.globalAlpha = 1;
+        }
+      }
+      lower = z.to;
+    }
+  }
+
   // Grid lines + Y labels
   ctx.strokeStyle = '#2a3340';
   ctx.fillStyle = '#8b949e';
@@ -738,7 +883,6 @@ function drawChart() {
   ctx.fillText(lastLabel, W - pad.r - ctx.measureText(lastLabel).width, H - 8);
 
   const px = (t) => pad.l + plotW * (t - t0) / tspan;
-  const py = (v) => pad.t + plotH * (1 - (v - min) / range);
 
   // Line
   ctx.beginPath();
