@@ -315,9 +315,12 @@ const DATA_CHAR    = 'e2e87a01-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
 const INTERVAL_CHAR= 'e2e87a02-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
 const STANDBY_CHAR = 'e2e87a03-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
 const BATTERY_CHAR = 'e2e87a04-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
+const LOGCTRL_CHAR = 'e2e87a05-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
+const LOGDATA_CHAR = 'e2e87a06-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
 
-let device, dataChar, intervalChar, standbyChar, batteryChar;
+let device, dataChar, intervalChar, standbyChar, batteryChar, logCtrlChar, logDataChar;
 let standbyOn = false;
+let dumpAccum = [];   // records received during a backlog dump
 
 // ---------- History storage ----------
 const HISTORY_KEY = 'aq_history_v1';
@@ -409,6 +412,7 @@ async function connectGatt(maxAttempts = 4) {
         await wireCharacteristics(svc);
         dbg('  ✓ fully connected');
         setConnected(true);
+        requestLogDump();          // pull anything the device logged while we were away
         return;                    // success
       } catch (e) {
         lastErr = e;
@@ -447,6 +451,19 @@ async function wireCharacteristics(svc) {
     dbg('    no battery char (old firmware?)');
   }
 
+  // History backlog characteristics (device-side logging while disconnected)
+  try {
+    logCtrlChar = await svc.getCharacteristic(LOGCTRL_CHAR);
+    logDataChar = await svc.getCharacteristic(LOGDATA_CHAR);
+    await logDataChar.startNotifications();
+    logDataChar.removeEventListener('characteristicvaluechanged', onLogData);
+    logDataChar.addEventListener('characteristicvaluechanged', onLogData);
+    dbg('    log chars OK');
+  } catch (e) {
+    logCtrlChar = null; logDataChar = null;
+    dbg('    no log chars (old firmware?)');
+  }
+
   const iv = await intervalChar.readValue();
   const ivSec = iv.getUint16(0, true);
   document.getElementById('intervalSlider').value = ivSec;
@@ -463,6 +480,74 @@ function onBattery(event) {
   const pct = dv.getUint8(0);
   const mv = dv.getUint8(1) | (dv.getUint8(2) << 8);
   updateBatteryUI(pct, mv / 1000);
+}
+
+// Ask the device to stream its on-board history buffer
+async function requestLogDump() {
+  if (!logCtrlChar) return;
+  dumpAccum = [];
+  try {
+    await logCtrlChar.writeValue(new Uint8Array([0x01]));
+    dbg('Requested device backlog…');
+  } catch (e) {
+    dbg('Backlog request failed: ' + e.message);
+  }
+}
+
+// Incoming backlog batch. Packet: [count u8] then count * 22-byte records.
+function onLogData(event) {
+  const dv = event.target.value;
+  if (dv.byteLength < 1) return;
+  const count = dv.getUint8(0);
+  if (count === 0) { finalizeDump(); return; }   // end-of-dump sentinel
+  const REC = 22;
+  const now = Date.now();
+  for (let i = 0; i < count; i++) {
+    const o = 1 + i * REC;
+    if (o + REC > dv.byteLength) break;
+    const age = dv.getUint32(o, true);            // ms ago, per device clock
+    dumpAccum.push({
+      t:    now - age,
+      pm1:  dv.getUint16(o + 4, true) / 10,
+      pm25: dv.getUint16(o + 6, true) / 10,
+      pm4:  dv.getUint16(o + 8, true) / 10,
+      pm10: dv.getUint16(o + 10, true) / 10,
+      co2:  dv.getUint16(o + 12, true),
+      voc:  dv.getUint16(o + 14, true),
+      nox:  dv.getUint16(o + 16, true),
+      temp: dv.getInt16(o + 18, true) / 100,
+      hum:  dv.getUint16(o + 20, true) / 100,
+    });
+  }
+}
+
+// Merge the dumped records into history, skipping ones we already have
+function finalizeDump() {
+  if (!dumpAccum.length) { dbg('Backlog empty'); return; }
+  const DEDUP_MS = 1500;
+  // Sort existing history so the dedup search is valid and stays ordered
+  history.sort((a, b) => a.t - b.t);
+  const toAdd = [];
+  for (const e of dumpAccum) {
+    // binary-search the (stable) sorted history for a point within DEDUP_MS of e.t
+    let lo = 0, hi = history.length - 1, dup = false;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const dt = history[mid].t - e.t;
+      if (Math.abs(dt) < DEDUP_MS) { dup = true; break; }
+      if (dt < 0) lo = mid + 1; else hi = mid - 1;
+    }
+    if (!dup) toAdd.push(e);
+  }
+  for (const e of toAdd) history.push(e);
+  history.sort((a, b) => a.t - b.t);
+  if (history.length > MAX_POINTS) history = history.slice(history.length - MAX_POINTS);
+  saveHistory();
+  updateHistoryMeta();
+  dbg('Backfilled ' + toAdd.length + ' new records (' + dumpAccum.length + ' in buffer)');
+  dumpAccum = [];
+  if (document.getElementById('historyTab').classList.contains('active')) drawChart();
+  if (document.getElementById('mapTab').classList.contains('active')) renderMap();
 }
 
 // Shared battery UI update (used by both the fast characteristic and the JSON path)
