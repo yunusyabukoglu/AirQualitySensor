@@ -118,6 +118,10 @@
   .metric-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; padding: 0 2px; }
   .metric-legend .lz { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--mute); }
   .metric-legend .lz i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .sync-status { font-size: 13px; border-radius: 10px; padding: 11px 14px; margin-bottom: 12px; line-height: 1.45; }
+  .sync-status.ok { background: rgba(63,185,80,0.12); border: 1px solid rgba(63,185,80,0.4); color: #7ee787; }
+  .sync-status.info { background: rgba(88,166,255,0.10); border: 1px solid rgba(88,166,255,0.35); color: #79c0ff; }
+  .sync-status.warn { background: rgba(210,153,34,0.12); border: 1px solid rgba(210,153,34,0.4); color: #e3b341; }
   .range-select { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; }
   .range-select button { padding: 5px 9px; font-size: 11px; background: var(--panel2); color: var(--mute); border: 1px solid var(--line); border-radius: 6px; }
   .range-select button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
@@ -234,6 +238,10 @@
 <!-- HISTORY TAB -->
 <div class="tab" id="historyTab">
   <div class="content">
+    <div id="syncStatus" class="sync-status" style="display:none;"></div>
+    <div style="display:flex; justify-content:flex-end; margin-bottom:10px;">
+      <button class="secondary" id="syncBtn" style="padding:6px 14px; font-size:13px;">⟳ Sync from device</button>
+    </div>
     <div class="metric-select" id="metricSelect">
       <button data-metric="co2" class="active">CO₂</button>
       <button data-metric="pm25">PM2.5</button>
@@ -321,6 +329,8 @@ const LOGDATA_CHAR = 'e2e87a06-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
 let device, dataChar, intervalChar, standbyChar, batteryChar, logCtrlChar, logDataChar;
 let standbyOn = false;
 let dumpAccum = [];   // records received during a backlog dump
+let dumpActive = false;
+let dumpTimeout = null;
 
 // ---------- History storage ----------
 const HISTORY_KEY = 'aq_history_v1';
@@ -482,15 +492,34 @@ function onBattery(event) {
   updateBatteryUI(pct, mv / 1000);
 }
 
+// Show a status message on the History tab
+function showSyncStatus(msg, kind) {
+  const el = document.getElementById('syncStatus');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'sync-status ' + (kind || 'info');
+  el.style.display = 'block';
+}
+
 // Ask the device to stream its on-board history buffer
 async function requestLogDump() {
-  if (!logCtrlChar) return;
+  if (!logCtrlChar) {
+    showSyncStatus("This device's firmware doesn't support offline logging yet — re-flash it with the latest firmware and power-cycle the unit.", 'warn');
+    return;
+  }
   dumpAccum = [];
+  dumpActive = true;
+  showSyncStatus('Syncing readings from the device…', 'info');
   try {
     await logCtrlChar.writeValue(new Uint8Array([0x01]));
     dbg('Requested device backlog…');
+    // Safety net: if no sentinel arrives, finalize whatever came in
+    clearTimeout(dumpTimeout);
+    dumpTimeout = setTimeout(() => { if (dumpActive) finalizeDump(); }, 6000);
   } catch (e) {
     dbg('Backlog request failed: ' + e.message);
+    showSyncStatus('Could not request data from the device: ' + e.message, 'warn');
+    dumpActive = false;
   }
 }
 
@@ -523,13 +552,19 @@ function onLogData(event) {
 
 // Merge the dumped records into history, skipping ones we already have
 function finalizeDump() {
-  if (!dumpAccum.length) { dbg('Backlog empty'); return; }
+  clearTimeout(dumpTimeout);
+  if (!dumpActive) return;       // already finalized
+  dumpActive = false;
+  const received = dumpAccum.length;
+  if (!received) {
+    showSyncStatus('Device had no buffered readings to sync. (The buffer clears on power-off — make sure it stays powered while away.)', 'info');
+    dbg('Backlog empty');
+    return;
+  }
   const DEDUP_MS = 1500;
-  // Sort existing history so the dedup search is valid and stays ordered
   history.sort((a, b) => a.t - b.t);
   const toAdd = [];
   for (const e of dumpAccum) {
-    // binary-search the (stable) sorted history for a point within DEDUP_MS of e.t
     let lo = 0, hi = history.length - 1, dup = false;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
@@ -544,8 +579,14 @@ function finalizeDump() {
   if (history.length > MAX_POINTS) history = history.slice(history.length - MAX_POINTS);
   saveHistory();
   updateHistoryMeta();
-  dbg('Backfilled ' + toAdd.length + ' new records (' + dumpAccum.length + ' in buffer)');
   dumpAccum = [];
+  if (toAdd.length > 0) {
+    showSyncStatus('✓ Synced ' + toAdd.length + ' new reading' + (toAdd.length === 1 ? '' : 's') +
+      ' from the device' + (received > toAdd.length ? ' (' + received + ' in buffer, rest already saved).' : '.'), 'ok');
+  } else {
+    showSyncStatus('Up to date — all ' + received + ' device readings were already saved.', 'info');
+  }
+  dbg('Backfilled ' + toAdd.length + ' new records (' + received + ' in buffer)');
   if (document.getElementById('historyTab').classList.contains('active')) drawChart();
   if (document.getElementById('mapTab').classList.contains('active')) renderMap();
 }
@@ -740,14 +781,12 @@ function updateIntervalDisplay(sec) { setIntervalUI(sec); }
 
 // ---------- Battery life model ----------
 function estimateBatteryLife(intervalSec) {
-  const capacity = 4500;   // mAh usable from a 5000 mAh 21700
-  const warmupSec = 15;
+  const capacity = 4500;    // mAh usable from a 5000 mAh 21700
+  // The sensor now runs continuously for accuracy, so the average draw is roughly
+  // constant regardless of interval (the interval only changes how often we log/send,
+  // which is negligible power next to the SEN66's fan + heater).
   const activeCurrent = 95; // mA (SEN66 measuring + MCU + BLE)
-  const idleCurrent = 6;    // mA (SEN66 idle + MCU + BLE advertising)
-  let avg;
-  if (intervalSec <= warmupSec + 5) avg = activeCurrent;
-  else avg = (warmupSec * activeCurrent + (intervalSec - warmupSec) * idleCurrent) / intervalSec;
-  return capacity / avg; // hours
+  return capacity / activeCurrent; // hours
 }
 function formatLife(hours) {
   if (hours >= 48) return (hours/24).toFixed(1) + ' days';
@@ -1286,6 +1325,13 @@ updateHistoryMeta();
 updateMetricInfo();
 document.getElementById('dbgClear').addEventListener('click', () => {
   document.getElementById('dbgLog').textContent = '';
+});
+document.getElementById('syncBtn').addEventListener('click', () => {
+  if (!device || !device.gatt || !device.gatt.connected) {
+    showSyncStatus('Connect to the device first, then sync.', 'warn');
+    return;
+  }
+  requestLogDump();
 });
 // Standby draws roughly the idle current (SEN66 stopped + MCU/BLE), ~6 mA
 document.getElementById('standbyEst').textContent =
