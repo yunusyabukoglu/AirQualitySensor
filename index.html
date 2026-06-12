@@ -2,261 +2,403 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#0e1116">
+<meta name="theme-color" content="#070A10">
 <link rel="manifest" href="manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <title>AQ Monitor</title>
 <style>
-  :root {
-    --bg: #0e1116;
-    --panel: #161b22;
-    --panel2: #1c2330;
-    --line: #2a3340;
-    --text: #e6edf3;
-    --mute: #8b949e;
-    --accent: #4da3ff;
-    --good: #3fb950;
-    --warn: #d29922;
-    --bad: #f85149;
+  :root{
+    --ink:#070A10;
+    --ink-2:#0B0F17;
+    --text:#EAF0F8;
+    --mute:#7E8B9F;
+    --faint:#47525F;
+    --line:rgba(255,255,255,0.08);
+    --line-2:rgba(255,255,255,0.05);
+    --glass:rgba(255,255,255,0.035);
+    --glass-2:rgba(255,255,255,0.055);
+    --cyan:#54E6FF;
+    /* shared air-quality color language (device LED <-> app) */
+    --good:#3FE0A2;
+    --mod:#FFD15C;
+    --poor:#FF9A5A;
+    --bad:#FF5C7A;
+    --aq:var(--mute);            /* current verdict color, set by JS */
   }
-  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  body {
-    margin: 0; padding: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    padding-bottom: 70px;
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{min-height:100%}
+  body{
+    background:var(--ink);
+    color:var(--text);
+    font-family:"Space Grotesk",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    display:flex;justify-content:center;
+    overflow-x:hidden;
   }
-  header {
-    position: sticky; top: 0; z-index: 10;
-    background: var(--panel);
-    border-bottom: 1px solid var(--line);
-    padding: 14px 16px;
-    display: flex; align-items: center; justify-content: space-between;
+  /* ambient atmosphere */
+  body::before,body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:0}
+  body::before{
+    background:
+      radial-gradient(60% 45% at 50% 8%, color-mix(in srgb, var(--aq) 20%, transparent), transparent 70%),
+      radial-gradient(55% 40% at 85% 80%, rgba(84,230,255,0.06), transparent 70%);
+    transition:background .9s ease;
   }
-  header h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: 0.02em; }
-  .status-dot {
-    display: inline-block; width: 9px; height: 9px; border-radius: 50%;
-    background: var(--bad); margin-right: 7px; vertical-align: middle;
+  body::after{
+    background-image:linear-gradient(var(--line-2) 1px,transparent 1px),
+                     linear-gradient(90deg,var(--line-2) 1px,transparent 1px);
+    background-size:34px 34px;
+    -webkit-mask-image:radial-gradient(circle at 50% 22%,#000 0%,transparent 75%);
+            mask-image:radial-gradient(circle at 50% 22%,#000 0%,transparent 75%);
+    opacity:.5;
   }
-  .status-dot.connected { background: var(--good); }
-  .conn-label { font-size: 12px; color: var(--mute); }
-  button {
-    font-family: inherit; cursor: pointer; border: none; border-radius: 8px;
-    font-size: 14px; font-weight: 600; padding: 9px 16px;
-    background: var(--accent); color: #fff; transition: opacity 0.15s;
+
+  .app{
+    position:relative;z-index:1;
+    width:100%;max-width:432px;min-height:100dvh;
+    padding:18px 18px 100px;
   }
-  button:active { opacity: 0.7; }
-  button.secondary { background: var(--panel2); color: var(--text); border: 1px solid var(--line); }
-  button:disabled { opacity: 0.4; cursor: default; }
 
-  .content { padding: 16px; max-width: 560px; margin: 0 auto; }
+  /* ---------- top bar ---------- */
+  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+  .brand{display:flex;align-items:baseline;gap:9px}
+  .wordmark{font-weight:700;font-size:14px;letter-spacing:.30em;padding-left:.30em;color:var(--text)}
+  .model{font-family:"JetBrains Mono",monospace;font-size:9.5px;letter-spacing:.14em;color:var(--faint);text-transform:uppercase}
+  .stat{display:flex;align-items:center;gap:12px}
+  .conn{display:flex;align-items:center;gap:6px;font-family:"JetBrains Mono",monospace;
+    font-size:10px;letter-spacing:.1em;color:var(--mute);text-transform:uppercase}
+  .status-dot{width:7px;height:7px;border-radius:50%;background:var(--bad);box-shadow:0 0 10px var(--bad);transition:.4s}
+  .status-dot.connected{background:var(--cyan);box-shadow:0 0 10px var(--cyan);animation:pulse 2.4s ease-in-out infinite}
+  .batt{display:flex;align-items:center;gap:6px;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--mute)}
+  .batt .cell{width:22px;height:11px;border:1px solid var(--line);border-radius:3px;position:relative;padding:1.5px}
+  .batt .cell::after{content:"";position:absolute;right:-3px;top:3px;width:2px;height:5px;background:var(--line);border-radius:0 1px 1px 0}
+  .batt .fill{height:100%;width:0%;background:var(--good);border-radius:1px;
+    box-shadow:0 0 8px color-mix(in srgb,var(--good) 60%,transparent);transition:width .4s,background .4s}
 
-  /* Reading cards */
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  .card {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
-    padding: 14px;
+  /* ---------- buttons ---------- */
+  button{font-family:inherit;cursor:pointer;border:none}
+  .btn{
+    font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--ink);background:var(--cyan);border-radius:10px;padding:9px 16px;font-weight:700;
+    box-shadow:0 0 16px color-mix(in srgb,var(--cyan) 30%,transparent);
+    transition:transform .12s ease,opacity .15s;
   }
-  .card.wide { grid-column: 1 / -1; }
-  .card .label { font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.08em; }
-  .card .value { font-size: 28px; font-weight: 700; margin-top: 4px; line-height: 1; }
-  .card .unit { font-size: 13px; color: var(--mute); font-weight: 400; margin-left: 4px; }
-  .card .sub { font-size: 11px; color: var(--mute); margin-top: 6px; }
-  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; }
-  .dot.good { background: var(--good); }
-  .dot.warn { background: var(--warn); }
-  .dot.bad  { background: var(--bad); }
-
-  /* Battery bar */
-  .batt-bar { height: 8px; background: var(--panel2); border-radius: 4px; overflow: hidden; margin-top: 8px; }
-  .batt-fill { height: 100%; background: var(--good); width: 0%; transition: width 0.4s, background 0.4s; }
-
-  /* Controls */
-  .control-group { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-top: 14px; }
-  .control-group h3 { margin: 0 0 12px; font-size: 13px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
-  .slider-row { display: flex; align-items: center; gap: 12px; }
-  input[type=range] { flex: 1; accent-color: var(--accent); height: 32px; }
-  .interval-display { font-size: 20px; font-weight: 700; min-width: 90px; text-align: right; }
-  .interval-num { width: 72px; font-size: 18px; font-weight: 700; text-align: right; padding: 6px 8px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; }
-  .estimate {
-    margin-top: 14px; padding: 12px; background: var(--panel2);
-    border-radius: 8px; display: flex; justify-content: space-between; align-items: center;
+  .btn:active{transform:scale(.96)}
+  .btn:disabled{opacity:.45;cursor:default}
+  .btn.ghost{
+    background:var(--glass-2);color:var(--mute);border:1px solid var(--line);box-shadow:none;font-weight:500;
   }
-  .estimate .est-label { font-size: 12px; color: var(--mute); }
-  .estimate .est-value { font-size: 18px; font-weight: 700; color: var(--accent); }
+  .btn.ghost.on{color:var(--ink);background:var(--good);border-color:transparent;
+    box-shadow:0 0 14px color-mix(in srgb,var(--good) 40%,transparent);font-weight:700}
 
-  .standby-btn { width: 100%; margin-top: 14px; padding: 14px; font-size: 15px; }
-  .standby-btn.active { background: var(--warn); }
+  /* ---------- hero ---------- */
+  .hero{display:flex;flex-direction:column;align-items:center;text-align:center;gap:2px;margin-top:2px}
+  .eyebrow{font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.28em;text-transform:uppercase;color:var(--faint)}
+  .orb-wrap{position:relative;width:236px;height:236px;margin:8px 0 2px;display:flex;align-items:center;justify-content:center}
+  .bloom{position:absolute;inset:-30px;border-radius:50%;
+    background:radial-gradient(circle,color-mix(in srgb,var(--aq) 50%,transparent) 0%,transparent 62%);
+    filter:blur(26px);opacity:.85;transition:background .9s ease;animation:breathe 6s ease-in-out infinite}
+  .ring{position:absolute;inset:0;border-radius:50%;
+    background:conic-gradient(from 0deg,transparent 0deg,
+      color-mix(in srgb,var(--aq) 90%,transparent) 70deg,var(--cyan) 140deg,transparent 210deg,
+      color-mix(in srgb,var(--aq) 60%,transparent) 320deg,transparent 360deg);
+    -webkit-mask:radial-gradient(circle,transparent 60%,#000 61%,#000 67%,transparent 68%);
+            mask:radial-gradient(circle,transparent 60%,#000 61%,#000 67%,transparent 68%);
+    animation:spin 14s linear infinite;opacity:.9}
+  .ticks{position:absolute;inset:8px;border-radius:50%;
+    background:repeating-conic-gradient(from 0deg,var(--line) 0deg .5deg,transparent .5deg 6deg);
+    -webkit-mask:radial-gradient(circle,transparent 70%,#000 71%,#000 74%,transparent 75%);
+            mask:radial-gradient(circle,transparent 70%,#000 71%,#000 74%,transparent 75%);opacity:.6}
+  .core{position:relative;width:170px;height:170px;border-radius:50%;
+    background:radial-gradient(circle at 50% 38%,color-mix(in srgb,var(--aq) 16%,transparent),transparent 70%),
+      linear-gradient(160deg,rgba(255,255,255,0.06),rgba(255,255,255,0.01));
+    border:1px solid var(--line);
+    backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    box-shadow:inset 0 1px 1px rgba(255,255,255,0.12),inset 0 -20px 40px rgba(0,0,0,0.4),
+               0 0 60px color-mix(in srgb,var(--aq) 22%,transparent);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    transition:box-shadow .9s ease}
+  .core .metric{font-family:"JetBrains Mono",monospace;font-size:9.5px;letter-spacing:.22em;text-transform:uppercase;color:var(--faint);margin-bottom:9px}
+  .core .reading{font-family:"JetBrains Mono",monospace;font-weight:700;font-size:50px;line-height:1;letter-spacing:-.02em;
+    color:var(--text);text-shadow:0 0 24px color-mix(in srgb,var(--aq) 70%,transparent)}
+  .core .unit{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--mute);margin-top:7px;letter-spacing:.05em}
+  .verdict{font-size:18px;font-weight:600;letter-spacing:.02em;color:var(--aq);transition:color .9s ease;margin-top:4px}
+  .updated{font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.08em;color:var(--faint);text-transform:uppercase}
 
-  /* Tabs */
-  .tabbar {
-    position: fixed; bottom: 0; left: 0; right: 0; z-index: 10;
-    background: var(--panel); border-top: 1px solid var(--line);
-    display: flex; height: 58px;
+  /* scan sweep on measure */
+  .scanline{position:absolute;inset:0;border-radius:50%;overflow:hidden;opacity:0;pointer-events:none;
+    -webkit-mask:radial-gradient(circle,#000 60%,transparent 61%);
+            mask:radial-gradient(circle,#000 60%,transparent 61%)}
+  .scanline::before{content:"";position:absolute;left:-30%;top:0;width:60%;height:100%;
+    background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--cyan) 70%,transparent),transparent)}
+  .orb-wrap.scanning .scanline{opacity:1;animation:sweep 1.1s ease-in-out}
+  .orb-wrap.scanning .core{animation:flicker 1.1s ease-in-out}
+
+  /* ---------- measure button ---------- */
+  .measure{position:relative;display:block;margin:10px auto 0;
+    font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:15px;letter-spacing:.06em;
+    color:var(--ink);background:var(--aq);
+    border-radius:14px;padding:14px 52px;
+    box-shadow:0 6px 24px color-mix(in srgb,var(--aq) 35%,transparent),inset 0 1px 0 rgba(255,255,255,0.4);
+    transition:transform .12s ease,box-shadow .9s ease,background .9s ease;overflow:hidden}
+  .measure:active{transform:scale(.96)}
+  .measure:disabled{opacity:.7;cursor:default}
+  .measure .ripple{position:absolute;border-radius:50%;background:rgba(255,255,255,0.5);
+    transform:translate(-50%,-50%) scale(0);pointer-events:none;animation:ripple .6s ease-out}
+  .measure-note{font-family:"JetBrains Mono",monospace;font-size:9.5px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--faint);text-align:center;margin-top:8px;min-height:12px}
+
+  /* ---------- section labels + cards ---------- */
+  .section-label{display:flex;align-items:center;gap:10px;margin:18px 0 10px;
+    font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--faint)}
+  .section-label::after{content:"";flex:1;height:1px;background:var(--line)}
+
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+  .card{position:relative;background:var(--glass);border:1px solid var(--line);
+    border-radius:16px;padding:13px 14px 12px;overflow:hidden;
+    backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+  .card.wide{grid-column:1 / -1}
+  .card .lvl{position:absolute;top:0;left:0;width:3px;height:100%;background:var(--c,transparent);box-shadow:0 0 12px var(--c,transparent)}
+  .card .k{display:flex;align-items:center;justify-content:space-between}
+  .card .name{font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--mute)}
+  .card .pip{width:6px;height:6px;border-radius:50%;background:var(--c,var(--faint));box-shadow:0 0 8px var(--c,transparent)}
+  .card .v{font-family:"JetBrains Mono",monospace;font-weight:700;font-size:26px;line-height:1;margin-top:12px;letter-spacing:-.01em}
+  .card .u{font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--faint);margin-left:5px;font-weight:400}
+  .card .sub{font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--mute);margin-top:8px;letter-spacing:.04em}
+
+  /* ---------- control panels ---------- */
+  .panel{background:var(--glass);border:1px solid var(--line);border-radius:16px;padding:16px;margin-top:10px;
+    backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+  .panel h3{font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.2em;text-transform:uppercase;
+    color:var(--faint);font-weight:500;margin-bottom:12px}
+  .note{font-size:12px;color:var(--mute);line-height:1.5;margin-top:10px}
+
+  .mode-toggle{display:flex;background:var(--glass-2);border:1px solid var(--line);border-radius:12px;padding:4px;gap:4px}
+  .mode-opt{flex:1;padding:9px;background:transparent;color:var(--mute);border-radius:9px;
+    font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;transition:.18s}
+  .mode-opt.active{background:var(--cyan);color:var(--ink);font-weight:700;
+    box-shadow:0 0 16px color-mix(in srgb,var(--cyan) 40%,transparent)}
+
+  .slider-row{display:flex;align-items:center;gap:12px}
+  input[type=range]{flex:1;accent-color:var(--cyan);height:32px}
+  .interval-num{width:72px;font-family:"JetBrains Mono",monospace;font-size:16px;font-weight:700;text-align:right;
+    padding:7px 9px;background:var(--glass-2);color:var(--text);border:1px solid var(--line);border-radius:9px}
+  .mono-mute{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--mute)}
+  .estimate{margin-top:14px;padding:12px 14px;background:var(--glass-2);border:1px solid var(--line-2);
+    border-radius:12px;display:flex;justify-content:space-between;align-items:center}
+  .estimate .est-label{font-size:12px;color:var(--mute)}
+  .estimate .est-value{font-family:"JetBrains Mono",monospace;font-size:16px;font-weight:700;color:var(--cyan)}
+
+  .standby-btn{width:100%;margin-top:14px;padding:13px;font-size:13px;border-radius:12px;
+    font-family:"JetBrains Mono",monospace;letter-spacing:.1em;text-transform:uppercase;
+    background:var(--glass-2);color:var(--text);border:1px solid var(--line);transition:.2s}
+  .standby-btn.active{background:var(--mod);color:var(--ink);font-weight:700;border-color:transparent;
+    box-shadow:0 0 18px color-mix(in srgb,var(--mod) 40%,transparent)}
+
+  details.panel summary{cursor:pointer;font-family:"JetBrains Mono",monospace;font-size:10px;
+    letter-spacing:.2em;text-transform:uppercase;color:var(--faint)}
+  #dbgLog{margin-top:10px;font-family:"JetBrains Mono",monospace;font-size:10px;line-height:1.55;color:var(--mute);
+    white-space:pre-wrap;word-break:break-word;max-height:240px;overflow:auto;
+    background:var(--ink-2);border:1px solid var(--line);border-radius:10px;padding:10px}
+
+  /* ---------- tabs (floating pill) ---------- */
+  .tabbar{position:fixed;bottom:0;left:0;right:0;z-index:1000;display:flex;justify-content:center;gap:4px;
+    padding:10px 0 calc(10px + env(safe-area-inset-bottom));
+    background:linear-gradient(transparent,var(--ink) 38%);pointer-events:none}
+  .tabbar .bar{display:flex;gap:6px;background:var(--glass-2);border:1px solid var(--line);
+    border-radius:16px;padding:5px;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);pointer-events:auto}
+  .tabbar .bar button{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--mute);background:none;padding:9px 22px;border-radius:11px;transition:.18s}
+  .tabbar .bar button.active{color:var(--ink);background:var(--cyan);
+    box-shadow:0 0 18px color-mix(in srgb,var(--cyan) 45%,transparent);font-weight:700}
+
+  .tab{display:none}
+  .tab.active{display:block}
+
+  /* ---------- history ---------- */
+  .chip-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .chip-row button{padding:6px 11px;font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.08em;
+    text-transform:uppercase;background:var(--glass-2);color:var(--mute);border:1px solid var(--line);border-radius:9px;transition:.15s}
+  .chip-row button.active{background:var(--cyan);color:var(--ink);border-color:transparent;font-weight:700;
+    box-shadow:0 0 12px color-mix(in srgb,var(--cyan) 35%,transparent)}
+  .custom-range{display:none;gap:6px;align-items:center;margin-bottom:10px}
+  .custom-range.show{display:flex}
+  .custom-range input,.custom-range select{padding:7px 9px;background:var(--glass-2);color:var(--text);
+    border:1px solid var(--line);border-radius:9px;font-family:"JetBrains Mono",monospace;font-size:12px}
+  .custom-range input{width:70px}
+  .hist-meta{font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--faint);display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+  .chart-wrap{background:var(--glass);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:12px;
+    backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+  #histChart{display:block;width:100%;height:220px}
+  .metric-explain{font-size:13px;line-height:1.55;margin-top:12px;background:var(--glass);
+    border:1px solid var(--line);border-radius:16px;padding:14px}
+  .metric-explain h4{margin:0 0 6px;font-size:13px;letter-spacing:.02em}
+  .metric-explain p{margin:0;color:var(--mute)}
+  .metric-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;padding:0 2px}
+  .metric-legend .lz{display:inline-flex;align-items:center;gap:5px;font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--mute)}
+  .metric-legend .lz i{width:11px;height:11px;border-radius:3px;display:inline-block}
+  .sync-status{font-size:13px;border-radius:12px;padding:11px 14px;margin-bottom:12px;line-height:1.45;border:1px solid}
+  .sync-status.ok{background:rgba(63,224,162,0.10);border-color:rgba(63,224,162,0.35);color:var(--good)}
+  .sync-status.info{background:rgba(84,230,255,0.08);border-color:rgba(84,230,255,0.3);color:var(--cyan)}
+  .sync-status.warn{background:rgba(255,209,92,0.10);border-color:rgba(255,209,92,0.35);color:var(--mod)}
+  .empty{text-align:center;color:var(--mute);padding:40px 20px;font-size:13px;line-height:1.5}
+
+  /* ---------- map ---------- */
+  #map{height:420px;border-radius:16px;border:1px solid var(--line);background:var(--ink-2)}
+  .leaflet-popup-content{font-size:12px;line-height:1.5}
+  #mapLegend{display:flex;gap:8px;align-items:center;text-transform:none}
+  #mapLegend .lg{display:inline-flex;align-items:center;gap:3px}
+  #mapLegend .lg i{width:9px;height:9px;border-radius:50%;display:inline-block}
+
+  /* ---------- entrance + keyframes ---------- */
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes breathe{0%,100%{transform:scale(1);opacity:.78}50%{transform:scale(1.06);opacity:.95}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  @keyframes sweep{0%{transform:translateX(-10%)}100%{transform:translateX(110%);opacity:0}}
+  @keyframes flicker{0%,100%{filter:brightness(1)}30%{filter:brightness(1.35)}60%{filter:brightness(.9)}}
+  @keyframes ripple{to{transform:translate(-50%,-50%) scale(14);opacity:0}}
+  @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+  #liveTab .hero{animation:rise .6s both}
+  #liveTab .measure{animation:rise .6s both .06s}
+  #liveTab .grid{animation:rise .6s both .12s}
+
+  @media (prefers-reduced-motion:reduce){
+    *{animation:none !important;transition:none !important}
   }
-  .tabbar button {
-    flex: 1; background: none; color: var(--mute); border-radius: 0;
-    font-size: 12px; font-weight: 600; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; gap: 3px; padding: 0;
-  }
-  .tabbar button.active { color: var(--accent); }
-  .tabbar .ico { font-size: 18px; }
-
-  .tab { display: none; }
-  .tab.active { display: block; }
-
-  /* History */
-  .chart-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
-  #histChart { display: block; width: 100%; height: 220px; }
-  .metric-explain { font-size: 13px; color: var(--text); line-height: 1.55; margin-top: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
-  .metric-explain h4 { margin: 0 0 6px; font-size: 14px; }
-  .metric-explain p { margin: 0; color: var(--mute); }
-  .metric-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; padding: 0 2px; }
-  .metric-legend .lz { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--mute); }
-  .metric-legend .lz i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
-  .sync-status { font-size: 13px; border-radius: 10px; padding: 11px 14px; margin-bottom: 12px; line-height: 1.45; }
-  .sync-status.ok { background: rgba(63,185,80,0.12); border: 1px solid rgba(63,185,80,0.4); color: #7ee787; }
-  .sync-status.info { background: rgba(88,166,255,0.10); border: 1px solid rgba(88,166,255,0.35); color: #79c0ff; }
-  .sync-status.warn { background: rgba(210,153,34,0.12); border: 1px solid rgba(210,153,34,0.4); color: #e3b341; }
-  .mode-toggle { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-  .mode-opt { flex: 1; padding: 10px; background: transparent; color: var(--mute); border: none; border-radius: 0; font-size: 14px; }
-  .mode-opt.active { background: var(--accent); color: #04122b; font-weight: 600; }
-  .range-select { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; }
-  .range-select button { padding: 5px 9px; font-size: 11px; background: var(--panel2); color: var(--mute); border: 1px solid var(--line); border-radius: 6px; }
-  .range-select button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .custom-range { display: none; gap: 6px; align-items: center; margin-bottom: 10px; }
-  .custom-range.show { display: flex; }
-  .custom-range input { width: 70px; padding: 6px 8px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
-  .custom-range select { padding: 6px 8px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
-  .metric-select { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
-  .metric-select button { padding: 6px 12px; font-size: 12px; background: var(--panel2); color: var(--mute); border: 1px solid var(--line); }
-  .metric-select button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .hist-meta { font-size: 12px; color: var(--mute); display: flex; justify-content: space-between; margin-bottom: 10px; }
-  .empty { text-align: center; color: var(--mute); padding: 40px 20px; font-size: 14px; }
-
-  /* Map */
-  #map { height: 420px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel2); }
-  .leaflet-popup-content { font-size: 12px; line-height: 1.5; }
-  #gpsBtn.active { background: var(--good); color: #fff; }
-  #mapLegend { display: flex; gap: 8px; align-items: center; }
-  #mapLegend .lg { display: inline-flex; align-items: center; gap: 3px; }
-  #mapLegend .lg i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 </style>
 </head>
 <body>
+<main class="app">
 
-<header>
-  <h1>AQ Monitor</h1>
-  <div>
-    <span class="conn-label"><span class="status-dot" id="statusDot"></span><span id="connText">Disconnected</span></span>
-    <button id="connBtn" style="margin-left:10px;">Connect</button>
+  <header class="topbar">
+    <div class="brand">
+      <span class="wordmark">AQ&nbsp;MONITOR</span>
+      <span class="model">V2 · SEN66</span>
+    </div>
+    <div class="stat">
+      <span class="batt"><span class="cell"><span class="fill" id="battFill"></span></span><span id="batt">--</span>%</span>
+      <button class="btn" id="connBtn">Connect</button>
+    </div>
+  </header>
+  <div class="conn" style="justify-content:flex-end;margin:-6px 0 6px;">
+    <span class="status-dot" id="statusDot"></span><span id="connText">Disconnected</span>
   </div>
-</header>
 
-<!-- LIVE TAB -->
-<div class="tab active" id="liveTab">
-  <div class="content">
-    <div class="grid">
-      <div class="card wide">
-        <div class="label">CO₂</div>
-        <div class="value"><span id="co2">--</span><span class="unit">ppm</span></div>
-        <div class="sub"><span class="dot" id="co2dot"></span><span id="co2status">waiting for data</span></div>
+  <!-- LIVE TAB -->
+  <div class="tab active" id="liveTab">
+
+    <section class="hero">
+      <span class="eyebrow">Portable Air Monitor</span>
+      <div class="orb-wrap" id="orb">
+        <div class="bloom"></div>
+        <div class="ring"></div>
+        <div class="ticks"></div>
+        <div class="scanline"></div>
+        <div class="core">
+          <span class="metric">PM2.5</span>
+          <span class="reading" id="pm25">--</span>
+          <span class="unit">µg/m³</span>
+        </div>
       </div>
-      <div class="card">
-        <div class="label">PM2.5</div>
-        <div class="value"><span id="pm25">--</span><span class="unit">µg/m³</span></div>
-        <div class="sub"><span class="dot" id="pm25dot"></span><span id="pm25status">—</span></div>
+      <div class="verdict" id="verdict">Standby</div>
+      <div class="updated" id="updated">No data yet</div>
+    </section>
+
+    <button class="measure" id="measureBtn">Measure</button>
+    <div class="measure-note" id="measureNote"></div>
+
+    <div class="section-label">Readings</div>
+    <section class="grid">
+      <div class="card wide" data-key="co2"><span class="lvl"></span>
+        <div class="k"><span class="name">CO₂</span><span class="pip" id="co2dot"></span></div>
+        <div class="v"><span id="co2">--</span><span class="u">ppm</span></div>
+        <div class="sub" id="co2status">waiting for data</div>
       </div>
-      <div class="card">
-        <div class="label">PM10</div>
-        <div class="value"><span id="pm10">--</span><span class="unit">µg/m³</span></div>
-        <div class="sub">PM1: <span id="pm1">--</span> · PM4: <span id="pm4">--</span></div>
+      <div class="card" data-key="pm10"><span class="lvl"></span>
+        <div class="k"><span class="name">PM10</span><span class="pip"></span></div>
+        <div class="v"><span id="pm10">--</span><span class="u">µg/m³</span></div>
+        <div class="sub">PM1 <span id="pm1">--</span> · PM4 <span id="pm4">--</span></div>
       </div>
-      <div class="card">
-        <div class="label">VOC Index</div>
-        <div class="value" id="voc">--</div>
-        <div class="sub"><span class="dot" id="vocdot"></span><span id="vocstatus">—</span></div>
+      <div class="card" data-key="voc"><span class="lvl"></span>
+        <div class="k"><span class="name">VOC</span><span class="pip" id="vocdot"></span></div>
+        <div class="v"><span id="voc">--</span><span class="u">index</span></div>
+        <div class="sub" id="vocstatus">—</div>
       </div>
-      <div class="card">
-        <div class="label">NOx Index</div>
-        <div class="value" id="nox">--</div>
+      <div class="card" data-key="nox"><span class="lvl"></span>
+        <div class="k"><span class="name">NOx</span><span class="pip"></span></div>
+        <div class="v"><span id="nox">--</span><span class="u">index</span></div>
         <div class="sub">100 = baseline</div>
       </div>
-      <div class="card">
-        <div class="label">Temperature</div>
-        <div class="value"><span id="temp">--</span><span class="unit">°C</span></div>
+      <div class="card" data-key="temp"><span class="lvl"></span>
+        <div class="k"><span class="name">Temp</span><span class="pip"></span></div>
+        <div class="v"><span id="temp">--</span><span class="u">°C</span></div>
       </div>
-      <div class="card">
-        <div class="label">Humidity</div>
-        <div class="value"><span id="hum">--</span><span class="unit">%</span></div>
+      <div class="card" data-key="hum"><span class="lvl"></span>
+        <div class="k"><span class="name">Humidity</span><span class="pip"></span></div>
+        <div class="v"><span id="hum">--</span><span class="u">%</span></div>
       </div>
-      <div class="card wide">
-        <div class="label">Battery</div>
-        <div class="value"><span id="batt">--</span><span class="unit">%</span> <span class="unit" id="vbat"></span></div>
-        <div class="batt-bar"><div class="batt-fill" id="battFill"></div></div>
-      </div>
-    </div>
+    </section>
 
-    <div class="control-group">
-      <h3>Sensor Mode</h3>
+    <div class="section-label">Device</div>
+
+    <div class="panel">
+      <h3>Sensor mode</h3>
       <div class="mode-toggle">
         <button id="modeContinuous" class="mode-opt active">Continuous</button>
         <button id="modeDuty" class="mode-opt">Duty-cycled</button>
       </div>
-      <div id="modeNote" style="font-size:12px; color:var(--mute); margin-top:10px; line-height:1.45;">
-        Continuous: sensor always on — most accurate, best when plugged in.
-      </div>
+      <div class="note" id="modeNote">Continuous: sensor always on — most accurate, best when plugged in.</div>
     </div>
 
-    <div class="control-group">
-      <h3>Measurement Interval</h3>
+    <div class="panel">
+      <h3>Measurement interval</h3>
       <div class="slider-row">
         <input type="range" id="intervalSlider" min="1" max="1800" step="1" value="30">
         <input type="number" id="intervalInput" min="1" max="1800" value="30" class="interval-num">
-        <span style="color:var(--mute); font-size:13px;">s</span>
+        <span class="mono-mute">s</span>
       </div>
-      <div id="intervalPretty" style="font-size:12px; color:var(--mute); margin-top:2px;">= 30 seconds</div>
-      <div style="display:flex; align-items:center; gap:10px; margin-top:10px;">
-        <button id="setIntervalBtn" style="padding:8px 18px;">Set</button>
-        <span id="intervalConfirm" style="font-size:12px; color:var(--mute);"></span>
+      <div class="mono-mute" id="intervalPretty" style="margin-top:2px;">= 30 seconds</div>
+      <div style="display:flex; align-items:center; gap:10px; margin-top:12px;">
+        <button class="btn" id="setIntervalBtn">Set</button>
+        <span class="mono-mute" id="intervalConfirm"></span>
       </div>
       <div class="estimate">
         <span class="est-label" id="estLabel">Estimated battery life (continuous)</span>
-        <span class="est-value" id="batteryEstimate">—</span>
+        <span class="est-value"><span id="batteryEstimate">—</span> <span class="mono-mute" id="vbat"></span></span>
       </div>
-      <button class="standby-btn secondary" id="standbyBtn">Enter Standby</button>
-      <div id="standbyEst" style="font-size:12px; color:var(--mute); margin-top:8px; text-align:center;">In standby: ~31 days estimated</div>
+      <button class="standby-btn" id="standbyBtn">Enter standby</button>
+      <div class="note" id="standbyEst" style="text-align:center; font-size:11px;">In standby: ~31 days estimated</div>
     </div>
 
-    <div class="control-group">
-      <h3>Location Tracking</h3>
+    <div class="panel">
+      <h3>Location tracking</h3>
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <span style="font-size:13px; color:var(--mute);">Tag readings with GPS location</span>
-        <button class="secondary" id="gpsBtn">Off</button>
+        <button class="btn ghost" id="gpsBtn">Off</button>
       </div>
-      <div style="font-size:12px; color:var(--mute); margin-top:10px;" id="gpsStatus">Location off — readings won't be mapped.</div>
+      <div class="note" id="gpsStatus">Location off — readings won't be mapped.</div>
     </div>
 
-    <details class="control-group" style="margin-top:14px;">
-      <summary style="cursor:pointer; font-size:13px; color:var(--mute);">Connection debug log</summary>
-      <pre id="dbgLog" style="margin-top:10px; font-size:11px; line-height:1.5; color:var(--text); white-space:pre-wrap; word-break:break-word; max-height:240px; overflow:auto; background:#0b0e13; border:1px solid var(--line); border-radius:8px; padding:10px;"></pre>
-      <button class="secondary" id="dbgClear" style="margin-top:8px; padding:4px 10px; font-size:11px;">Clear log</button>
+    <details class="panel">
+      <summary>Connection debug log</summary>
+      <pre id="dbgLog"></pre>
+      <button class="btn ghost" id="dbgClear" style="margin-top:8px; padding:5px 10px; font-size:10px;">Clear log</button>
     </details>
   </div>
-</div>
 
-<!-- HISTORY TAB -->
-<div class="tab" id="historyTab">
-  <div class="content">
+  <!-- HISTORY TAB -->
+  <div class="tab" id="historyTab">
     <div id="syncStatus" class="sync-status" style="display:none;"></div>
     <div style="display:flex; justify-content:flex-end; margin-bottom:10px;">
-      <button class="secondary" id="syncBtn" style="padding:6px 14px; font-size:13px;">⟳ Sync from device</button>
+      <button class="btn ghost" id="syncBtn" style="padding:7px 14px;">⟳ Sync from device</button>
     </div>
-    <div class="metric-select" id="metricSelect">
+    <div class="chip-row" id="metricSelect">
       <button data-metric="co2" class="active">CO₂</button>
       <button data-metric="pm25">PM2.5</button>
       <button data-metric="pm10">PM10</button>
@@ -265,7 +407,7 @@
       <button data-metric="temp">Temp</button>
       <button data-metric="hum">Humidity</button>
     </div>
-    <div class="range-select" id="rangeSelect">
+    <div class="chip-row" id="rangeSelect">
       <button data-sec="10">10s</button>
       <button data-sec="30">30s</button>
       <button data-sec="60">1m</button>
@@ -288,11 +430,11 @@
         <option value="3600" selected>hours</option>
         <option value="86400">days</option>
       </select>
-      <button class="secondary" id="applyCustom" style="padding:6px 12px; font-size:12px;">Apply</button>
+      <button class="btn ghost" id="applyCustom" style="padding:7px 12px;">Apply</button>
     </div>
     <div class="hist-meta">
       <span id="histCount">0 readings stored</span>
-      <button class="secondary" id="clearHistory" style="padding:4px 10px; font-size:11px;">Clear</button>
+      <button class="btn ghost" id="clearHistory" style="padding:4px 10px; font-size:10px;">Clear</button>
     </div>
     <div class="chart-wrap">
       <canvas id="histChart"></canvas>
@@ -301,12 +443,10 @@
     <div class="metric-explain" id="metricExplain"></div>
     <div class="metric-legend" id="metricLegend"></div>
   </div>
-</div>
 
-<!-- MAP TAB -->
-<div class="tab" id="mapTab">
-  <div class="content">
-    <div class="metric-select" id="mapMetricSelect">
+  <!-- MAP TAB -->
+  <div class="tab" id="mapTab">
+    <div class="chip-row" id="mapMetricSelect">
       <button data-metric="pm25" class="active">PM2.5</button>
       <button data-metric="co2">CO₂</button>
       <button data-metric="pm10">PM10</button>
@@ -320,14 +460,17 @@
     <div id="map"></div>
     <div class="empty" id="mapEmpty">No located readings yet. Turn on Location Tracking in the Live tab and move around to build a map.</div>
   </div>
-</div>
+
+</main>
 
 <!-- TAB BAR -->
-<div class="tabbar">
-  <button class="active" data-tab="liveTab"><span class="ico">📊</span>Live</button>
-  <button data-tab="historyTab"><span class="ico">📈</span>History</button>
-  <button data-tab="mapTab"><span class="ico">🗺️</span>Map</button>
-</div>
+<nav class="tabbar">
+  <div class="bar">
+    <button class="active" data-tab="liveTab">Live</button>
+    <button data-tab="historyTab">History</button>
+    <button data-tab="mapTab">Map</button>
+  </div>
+</nav>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -347,6 +490,11 @@ let continuousMode = true;   // mirrors the device's sensor mode
 let dumpAccum = [];   // records received during a backlog dump
 let dumpActive = false;
 let dumpTimeout = null;
+
+// ---------- Shared color language ----------
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const C = { good: '#3FE0A2', mod: '#FFD15C', poor: '#FF9A5A', bad: '#FF5C7A',
+            haz: '#C879FF', cold: '#5AA7FF', cool: '#54E6FF' };
 
 // ---------- History storage ----------
 const HISTORY_KEY = 'aq_history_v1';
@@ -633,7 +781,8 @@ function updateBatteryUI(pct, volts) {
     document.getElementById('batt').textContent = pct;
     const fill = document.getElementById('battFill');
     fill.style.width = pct + '%';
-    fill.style.background = pct > 40 ? 'var(--good)' : pct > 15 ? 'var(--warn)' : 'var(--bad)';
+    fill.style.background = pct > 40 ? C.good : pct > 15 ? C.mod : C.bad;
+    fill.style.boxShadow = '0 0 8px ' + fill.style.background;
   }
   if (volts) document.getElementById('vbat').textContent = volts.toFixed(2) + 'V';
 }
@@ -683,11 +832,13 @@ async function tryRestoreConnection() {
 
 function setConnected(c) {
   document.getElementById('statusDot').classList.toggle('connected', c);
-  document.getElementById('connText').textContent = c ? 'Connected' : 'Disconnected';
+  document.getElementById('connText').textContent = c ? 'Linked' : 'Disconnected';
   document.getElementById('connBtn').textContent = c ? 'Disconnect' : 'Connect';
 }
 
 // ---------- Incoming data ----------
+let lastDataTime = null;   // for the "Updated Xs ago" label
+
 function onData(event) {
   let json;
   try { json = new TextDecoder().decode(event.target.value); } catch { return; }
@@ -713,32 +864,70 @@ function onData(event) {
   }
 }
 
+// Overall verdict drives the orb/ambient color: worst of PM2.5 and CO₂
+function levelPM25(v){ return v<=12?0 : v<=35?1 : v<=55?2 : 3; }
+function levelCO2(v){ return v<=800?0 : v<=1200?1 : v<=2000?2 : 3; }
+const LEVEL_COLORS = [C.good, C.mod, C.poor, C.bad];
+const LEVEL_WORDS  = ['Good', 'Moderate', 'Poor', 'Unhealthy'];
+
+function setVerdict(d) {
+  let lvl = -1, why = '';
+  if (d.pm25 !== undefined) { const l = levelPM25(d.pm25); if (l > lvl) { lvl = l; why = 'PM2.5'; } }
+  if (d.co2  !== undefined) { const l = levelCO2(d.co2);   if (l > lvl) { lvl = l; why = 'CO₂'; } }
+  if (lvl < 0) return;
+  document.documentElement.style.setProperty('--aq', LEVEL_COLORS[lvl]);
+  document.getElementById('verdict').textContent =
+    LEVEL_WORDS[lvl] + (lvl > 0 ? ' · ' + why : '');
+}
+
 function updateLive(d) {
   setText('co2', d.co2); setText('pm25', d.pm25); setText('pm10', d.pm10);
   setText('pm1', d.pm1); setText('pm4', d.pm4);
-  setText('voc', Math.round(d.voc)); setText('nox', Math.round(d.nox));
+  setText('voc', d.voc !== undefined ? Math.round(d.voc) : undefined);
+  setText('nox', d.nox !== undefined ? Math.round(d.nox) : undefined);
   setText('temp', d.temp?.toFixed(1)); setText('hum', d.hum?.toFixed(0));
 
   // Battery (the dedicated 5 s characteristic also updates this; harmless overlap)
   if (d.batt !== undefined) updateBatteryUI(d.batt, d.vbat);
 
-  // CO2 status
-  statusDot('co2dot', 'co2status', d.co2,
-    [[800,'good','Well ventilated'],[1200,'warn','Getting stuffy'],[Infinity,'bad','Poor — ventilate']]);
-  // PM2.5 status
-  statusDot('pm25dot', 'pm25status', d.pm25,
-    [[12,'good','Good'],[35,'warn','Moderate'],[Infinity,'bad','Unhealthy']]);
-  // VOC status
-  statusDot('vocdot', 'vocstatus', d.voc,
-    [[150,'good','Normal'],[250,'warn','Elevated'],[Infinity,'bad','High']]);
+  // Verdict orb + ambient color
+  setVerdict(d);
+  lastDataTime = Date.now();
+  tickUpdated();
+
+  // CO2 status text
+  statusFor('co2', 'co2status', d.co2,
+    [[800,C.good,'Well ventilated'],[1200,C.mod,'Getting stuffy'],[Infinity,C.bad,'Poor — ventilate']]);
+  // VOC status text
+  statusFor('voc', 'vocstatus', d.voc,
+    [[150,C.good,'Normal'],[250,C.mod,'Elevated'],[Infinity,C.bad,'High']]);
+
+  // Card edge/pip colors
+  paintCard('pm10', d.pm10, [[54,C.good],[154,C.mod],[254,C.poor],[Infinity,C.bad]]);
+  paintCard('nox',  d.nox,  [[20,C.good],[150,C.mod],[300,C.poor],[Infinity,C.bad]]);
+  paintCard('temp', d.temp, [[16,C.cold],[19,C.cool],[25,C.good],[28,C.mod],[Infinity,C.bad]]);
+  paintCard('hum',  d.hum,  null, (v)=> (v>=30&&v<=60)?C.good : (v>=20&&v<=70)?C.mod : C.poor);
 }
 
-function statusDot(dotId, txtId, val, thresholds) {
+// Color a card's accent (left edge + pip) and optionally its status text
+function paintCard(key, val, thresholds, fn) {
+  if (val === undefined || val === null) return;
+  const card = document.querySelector('.card[data-key="' + key + '"]');
+  if (!card) return;
+  let color;
+  if (fn) color = fn(val);
+  else for (const [limit, c] of thresholds) if (val <= limit) { color = c; break; }
+  card.style.setProperty('--c', color);
+}
+
+function statusFor(key, txtId, val, thresholds) {
   if (val === undefined) return;
-  for (const [limit, cls, label] of thresholds) {
+  for (const [limit, color, label] of thresholds) {
     if (val <= limit) {
-      document.getElementById(dotId).className = 'dot ' + cls;
-      document.getElementById(txtId).textContent = label;
+      const card = document.querySelector('.card[data-key="' + key + '"]');
+      if (card) card.style.setProperty('--c', color);
+      const t = document.getElementById(txtId);
+      if (t) t.textContent = label;
       return;
     }
   }
@@ -748,6 +937,67 @@ function setText(id, val) {
   const el = document.getElementById(id);
   if (el && val !== undefined && val !== null) el.textContent = val;
 }
+
+// "Updated Xs ago" ticker under the orb
+function tickUpdated() {
+  const el = document.getElementById('updated');
+  if (!lastDataTime) return;
+  const s = Math.round((Date.now() - lastDataTime) / 1000);
+  el.textContent = s < 3 ? 'Just now'
+    : s < 90 ? 'Updated ' + s + 's ago'
+    : 'Updated ' + Math.round(s / 60) + 'm ago';
+}
+setInterval(tickUpdated, 3000);
+
+// ---------- Measure: pull the latest reading from the device on demand ----------
+const measureBtn = document.getElementById('measureBtn');
+const measureNote = document.getElementById('measureNote');
+const orbEl = document.getElementById('orb');
+
+async function measureNow() {
+  if (!device || !device.gatt || !device.gatt.connected || !dataChar) {
+    measureNote.textContent = 'Connect to the monitor first';
+    setTimeout(() => { measureNote.textContent = ''; }, 2500);
+    return;
+  }
+  measureBtn.disabled = true;
+  measureBtn.textContent = 'Reading…';
+  orbEl.classList.add('scanning');
+  const started = Date.now();
+  try {
+    const dv = await dataChar.readValue();
+    let d = null;
+    try { d = JSON.parse(new TextDecoder().decode(dv)); } catch {}
+    if (d && !d.status) {
+      updateLive(d);     // refresh the display (notifications handle history logging)
+      measureNote.textContent = '';
+    } else {
+      measureNote.textContent = 'Device is warming up — try again shortly';
+      setTimeout(() => { measureNote.textContent = ''; }, 3000);
+    }
+  } catch (e) {
+    dbg('Measure read failed: ' + e.message);
+    measureNote.textContent = 'Read failed — check the connection';
+    setTimeout(() => { measureNote.textContent = ''; }, 3000);
+  }
+  // Let the scan animation play out even if the read returned instantly
+  const wait = Math.max(0, 1100 - (Date.now() - started));
+  setTimeout(() => {
+    orbEl.classList.remove('scanning');
+    measureBtn.disabled = false;
+    measureBtn.textContent = 'Measure';
+  }, wait);
+}
+
+measureBtn.addEventListener('click', (e) => {
+  const r = document.createElement('span');
+  r.className = 'ripple';
+  const b = measureBtn.getBoundingClientRect();
+  r.style.left = (e.clientX - b.left) + 'px'; r.style.top = (e.clientY - b.top) + 'px';
+  r.style.width = r.style.height = '12px';
+  measureBtn.appendChild(r); setTimeout(() => r.remove(), 600);
+  measureNow();
+});
 
 // ---------- Interval control (slider + typed input) ----------
 const slider = document.getElementById('intervalSlider');
@@ -774,7 +1024,7 @@ async function commitInterval(sec) {
   try { await intervalChar.writeValue(buf); } catch (e) { console.error(e); }
 }
 
-// Slider and number box are PREVIEW only now — they update the display but do
+// Slider and number box are PREVIEW only — they update the display but do
 // not push to the device until the user presses "Set". This makes the push explicit.
 slider.addEventListener('input', () => { setIntervalUI(parseInt(slider.value)); markUnsent(); });
 intervalInput.addEventListener('input', () => {
@@ -791,7 +1041,7 @@ function markUnsent() {
 // The Set button commits the value and confirms by reading it back from the device
 document.getElementById('setIntervalBtn').addEventListener('click', async () => {
   const c = document.getElementById('intervalConfirm');
-  if (!intervalChar) { c.textContent = 'connect first'; c.style.color = 'var(--warn)'; return; }
+  if (!intervalChar) { c.textContent = 'connect first'; c.style.color = C.mod; return; }
   const sec = setIntervalUI(parseInt(slider.value));
   c.textContent = 'sending…'; c.style.color = 'var(--mute)';
   try {
@@ -801,14 +1051,14 @@ document.getElementById('setIntervalBtn').addEventListener('click', async () => 
     const got = rb.getUint16(0, true);
     if (got === sec) {
       c.textContent = '✓ set to ' + (sec < 60 ? sec + 's' : (sec/60).toFixed(sec%60?1:0) + 'm') + ' on device';
-      c.style.color = 'var(--good)';
+      c.style.color = C.good;
     } else {
       c.textContent = '⚠ device shows ' + got + 's';
-      c.style.color = 'var(--warn)';
+      c.style.color = C.mod;
     }
   } catch (e) {
     c.textContent = '✗ failed to send';
-    c.style.color = 'var(--bad)';
+    c.style.color = C.bad;
   }
 });
 
@@ -875,14 +1125,14 @@ document.getElementById('standbyBtn').addEventListener('click', async () => {
 function setStandbyUI(on) {
   standbyOn = on;
   const btn = document.getElementById('standbyBtn');
-  btn.textContent = on ? 'Wake from Standby' : 'Enter Standby';
+  btn.textContent = on ? 'Wake from standby' : 'Enter standby';
   btn.classList.toggle('active', on);
 }
 
 // ---------- Tabs ----------
-document.querySelectorAll('.tabbar button').forEach(b => {
+document.querySelectorAll('.tabbar .bar button').forEach(b => {
   b.addEventListener('click', () => {
-    document.querySelectorAll('.tabbar button').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tabbar .bar button').forEach(x => x.classList.remove('active'));
     document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     document.getElementById(b.dataset.tab).classList.add('active');
@@ -928,7 +1178,7 @@ function startGps() {
   gpsTracking = true;
   const btn = document.getElementById('gpsBtn');
   btn.textContent = 'On';
-  btn.classList.add('active');
+  btn.classList.add('on');
   document.getElementById('gpsStatus').textContent = 'Acquiring GPS fix…';
 }
 
@@ -938,7 +1188,7 @@ function stopGps() {
   gpsTracking = false;
   const btn = document.getElementById('gpsBtn');
   btn.textContent = 'Off';
-  btn.classList.remove('active');
+  btn.classList.remove('on');
   document.getElementById('gpsStatus').textContent = "Location off — readings won't be mapped.";
 }
 
@@ -953,49 +1203,49 @@ const metricLabels = { co2:'CO₂ (ppm)', pm25:'PM2.5 (µg/m³)', pm10:'PM10 (µ
 // {to: upperBound, color, label}. The last band uses Infinity.
 const healthZones = {
   co2: [
-    { to: 600,  color: '#2ea043', label: 'fresh' },
-    { to: 800,  color: '#3fb950', label: 'good' },
-    { to: 1000, color: '#d29922', label: 'moderate' },
-    { to: 1500, color: '#f0883e', label: 'poor' },
-    { to: Infinity, color: '#f85149', label: 'unhealthy' }
+    { to: 600,  color: '#2BC489', label: 'fresh' },
+    { to: 800,  color: '#3FE0A2', label: 'good' },
+    { to: 1000, color: '#FFD15C', label: 'moderate' },
+    { to: 1500, color: '#FF9A5A', label: 'poor' },
+    { to: Infinity, color: '#FF5C7A', label: 'unhealthy' }
   ],
   pm25: [
-    { to: 12,  color: '#3fb950', label: 'good' },
-    { to: 35,  color: '#d29922', label: 'moderate' },
-    { to: 55,  color: '#f0883e', label: 'unhealthy (sensitive)' },
-    { to: 150, color: '#f85149', label: 'unhealthy' },
-    { to: Infinity, color: '#a371f7', label: 'hazardous' }
+    { to: 12,  color: '#3FE0A2', label: 'good' },
+    { to: 35,  color: '#FFD15C', label: 'moderate' },
+    { to: 55,  color: '#FF9A5A', label: 'unhealthy (sensitive)' },
+    { to: 150, color: '#FF5C7A', label: 'unhealthy' },
+    { to: Infinity, color: '#C879FF', label: 'hazardous' }
   ],
   pm10: [
-    { to: 54,  color: '#3fb950', label: 'good' },
-    { to: 154, color: '#d29922', label: 'moderate' },
-    { to: 254, color: '#f0883e', label: 'unhealthy' },
-    { to: Infinity, color: '#f85149', label: 'hazardous' }
+    { to: 54,  color: '#3FE0A2', label: 'good' },
+    { to: 154, color: '#FFD15C', label: 'moderate' },
+    { to: 254, color: '#FF9A5A', label: 'unhealthy' },
+    { to: Infinity, color: '#FF5C7A', label: 'hazardous' }
   ],
   voc: [
-    { to: 100, color: '#3fb950', label: 'clean' },
-    { to: 200, color: '#d29922', label: 'moderate' },
-    { to: 300, color: '#f0883e', label: 'elevated' },
-    { to: Infinity, color: '#f85149', label: 'high' }
+    { to: 100, color: '#3FE0A2', label: 'clean' },
+    { to: 200, color: '#FFD15C', label: 'moderate' },
+    { to: 300, color: '#FF9A5A', label: 'elevated' },
+    { to: Infinity, color: '#FF5C7A', label: 'high' }
   ],
   nox: [
-    { to: 20,  color: '#3fb950', label: 'good' },
-    { to: 150, color: '#d29922', label: 'moderate' },
-    { to: 300, color: '#f0883e', label: 'elevated' },
-    { to: Infinity, color: '#f85149', label: 'high' }
+    { to: 20,  color: '#3FE0A2', label: 'good' },
+    { to: 150, color: '#FFD15C', label: 'moderate' },
+    { to: 300, color: '#FF9A5A', label: 'elevated' },
+    { to: Infinity, color: '#FF5C7A', label: 'high' }
   ],
   temp: [
-    { to: 16, color: '#388bfd', label: 'cold' },
-    { to: 19, color: '#39c5cf', label: 'cool' },
-    { to: 25, color: '#3fb950', label: 'comfortable' },
-    { to: 28, color: '#d29922', label: 'warm' },
-    { to: Infinity, color: '#f85149', label: 'hot' }
+    { to: 16, color: '#5AA7FF', label: 'cold' },
+    { to: 19, color: '#54E6FF', label: 'cool' },
+    { to: 25, color: '#3FE0A2', label: 'comfortable' },
+    { to: 28, color: '#FFD15C', label: 'warm' },
+    { to: Infinity, color: '#FF5C7A', label: 'hot' }
   ],
   hum: [
-    { to: 30, color: '#d29922', label: 'dry' },
-    { to: 60, color: '#3fb950', label: 'comfortable' },
-    { to: 70, color: '#d29922', label: 'humid' },
-    { to: Infinity, color: '#f85149', label: 'too humid' }
+    { to: 30, color: '#FFD15C', label: 'dry' },
+    { to: 60, color: '#3FE0A2', label: 'comfortable' },
+    { to: 70, color: '#FFD15C', label: 'humid' },
+    { to: Infinity, color: '#FF5C7A', label: 'too humid' }
   ]
 };
 
@@ -1138,13 +1388,13 @@ function drawChart() {
         const yTop = py(bandTop);
         const yBot = py(bandBot);
         ctx.fillStyle = z.color;
-        ctx.globalAlpha = 0.13;
+        ctx.globalAlpha = 0.11;
         ctx.fillRect(pad.l, yTop, plotW, yBot - yTop);
         ctx.globalAlpha = 1;
         if (yBot - yTop > 14) {
           ctx.fillStyle = z.color;
           ctx.globalAlpha = 0.9;
-          ctx.font = '9px -apple-system, sans-serif';
+          ctx.font = '9px "JetBrains Mono", monospace';
           ctx.textAlign = 'right';
           ctx.fillText(z.label, W - pad.r - 3, (yTop + yBot) / 2 + 3);
           ctx.textAlign = 'left';
@@ -1156,9 +1406,9 @@ function drawChart() {
   }
 
   // Grid lines + Y labels
-  ctx.strokeStyle = '#2a3340';
-  ctx.fillStyle = '#8b949e';
-  ctx.font = '10px -apple-system, sans-serif';
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+  ctx.fillStyle = '#7E8B9F';
+  ctx.font = '10px "JetBrains Mono", monospace';
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const y = pad.t + plotH * i / 4;
@@ -1189,20 +1439,23 @@ function drawChart() {
     const x = px(h.t), y = py(h[currentMetric]);
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
   });
-  ctx.strokeStyle = '#4da3ff';
+  ctx.strokeStyle = '#54E6FF';
   ctx.lineWidth = 2;
   ctx.lineJoin = 'round';
+  ctx.shadowColor = 'rgba(84,230,255,0.45)';
+  ctx.shadowBlur = 6;
   ctx.stroke();
+  ctx.shadowBlur = 0;
 
   // Fill under the line
   ctx.lineTo(px(t1), H - pad.b);
   ctx.lineTo(px(t0), H - pad.b);
   ctx.closePath();
-  ctx.fillStyle = 'rgba(77,163,255,0.12)';
+  ctx.fillStyle = 'rgba(84,230,255,0.09)';
   ctx.fill();
 
   // Title + point count
-  ctx.fillStyle = '#8b949e';
+  ctx.fillStyle = '#7E8B9F';
   ctx.fillText(metricLabels[currentMetric] + '  (' + rows.length + ' pts)', pad.l, 10);
 
   // Save geometry for tap hit-testing
@@ -1219,37 +1472,37 @@ function drawChart() {
     const x = px(nearest.t), y = py(nearest[currentMetric]);
 
     // Vertical guide line
-    ctx.strokeStyle = 'rgba(230,237,243,0.35)';
+    ctx.strokeStyle = 'rgba(234,240,248,0.35)';
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, H - pad.b); ctx.stroke();
 
     // Point dot
     ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2);
-    ctx.fillStyle = '#4da3ff'; ctx.fill();
+    ctx.fillStyle = '#54E6FF'; ctx.fill();
     ctx.lineWidth = 2; ctx.strokeStyle = '#fff'; ctx.stroke();
 
     // Tooltip
     const val = nearest[currentMetric];
     const valStr = (Math.abs(val) < 10 ? val.toFixed(1) : Math.round(val)) + '';
     const timeStr = new Date(nearest.t).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    ctx.font = 'bold 12px -apple-system, sans-serif';
+    ctx.font = 'bold 12px "JetBrains Mono", monospace';
     const w1 = ctx.measureText(valStr).width;
-    ctx.font = '10px -apple-system, sans-serif';
+    ctx.font = '10px "JetBrains Mono", monospace';
     const w2 = ctx.measureText(timeStr).width;
     const boxW = Math.max(w1, w2) + 16;
     const boxH = 34;
     let bx = x + 8;
     if (bx + boxW > W - pad.r) bx = x - boxW - 8;   // flip if near right edge
     let by = Math.max(pad.t, Math.min(y - boxH - 6, H - pad.b - boxH));
-    ctx.fillStyle = 'rgba(20,26,34,0.95)';
-    ctx.strokeStyle = '#2a3340';
+    ctx.fillStyle = 'rgba(11,15,23,0.95)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
     ctx.lineWidth = 1;
     if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(bx, by, boxW, boxH, 6); ctx.fill(); ctx.stroke(); }
     else { ctx.fillRect(bx, by, boxW, boxH); ctx.strokeRect(bx, by, boxW, boxH); }
     ctx.textAlign = 'left';
-    ctx.fillStyle = '#e6edf3'; ctx.font = 'bold 12px -apple-system, sans-serif';
+    ctx.fillStyle = '#EAF0F8'; ctx.font = 'bold 12px "JetBrains Mono", monospace';
     ctx.fillText(valStr, bx + 8, by + 15);
-    ctx.fillStyle = '#8b949e'; ctx.font = '10px -apple-system, sans-serif';
+    ctx.fillStyle = '#7E8B9F'; ctx.font = '10px "JetBrains Mono", monospace';
     ctx.fillText(timeStr, bx + 8, by + 28);
   }
 }
@@ -1284,17 +1537,17 @@ let mapMetric = 'pm25';
 
 // Color thresholds per metric: [limit, color] ascending. Last is the "worst" bucket.
 const colorScales = {
-  pm25: [[12,'#3fb950'],[35,'#d29922'],[55,'#f0883e'],[Infinity,'#f85149']],
-  pm10: [[54,'#3fb950'],[154,'#d29922'],[254,'#f0883e'],[Infinity,'#f85149']],
-  co2:  [[800,'#3fb950'],[1200,'#d29922'],[2000,'#f0883e'],[Infinity,'#f85149']],
-  voc:  [[150,'#3fb950'],[250,'#d29922'],[400,'#f0883e'],[Infinity,'#f85149']],
-  nox:  [[20,'#3fb950'],[150,'#d29922'],[300,'#f0883e'],[Infinity,'#f85149']]
+  pm25: [[12,'#3FE0A2'],[35,'#FFD15C'],[55,'#FF9A5A'],[Infinity,'#FF5C7A']],
+  pm10: [[54,'#3FE0A2'],[154,'#FFD15C'],[254,'#FF9A5A'],[Infinity,'#FF5C7A']],
+  co2:  [[800,'#3FE0A2'],[1200,'#FFD15C'],[2000,'#FF9A5A'],[Infinity,'#FF5C7A']],
+  voc:  [[150,'#3FE0A2'],[250,'#FFD15C'],[400,'#FF9A5A'],[Infinity,'#FF5C7A']],
+  nox:  [[20,'#3FE0A2'],[150,'#FFD15C'],[300,'#FF9A5A'],[Infinity,'#FF5C7A']]
 };
 
 function colorFor(metric, val) {
   const scale = colorScales[metric] || colorScales.pm25;
   for (const [limit, color] of scale) if (val <= limit) return color;
-  return '#f85149';
+  return '#FF5C7A';
 }
 
 document.querySelectorAll('#mapMetricSelect button').forEach(b => {
@@ -1329,9 +1582,9 @@ function renderMap() {
   // Legend
   const lbl = { pm25:'PM2.5', pm10:'PM10', co2:'CO₂', voc:'VOC', nox:'NOx' }[mapMetric];
   document.getElementById('mapLegend').innerHTML =
-    `<span class="lg"><i style="background:#3fb950"></i>good</span>` +
-    `<span class="lg"><i style="background:#d29922"></i>mod</span>` +
-    `<span class="lg"><i style="background:#f85149"></i>poor</span>`;
+    `<span class="lg"><i style="background:#3FE0A2"></i>good</span>` +
+    `<span class="lg"><i style="background:#FFD15C"></i>mod</span>` +
+    `<span class="lg"><i style="background:#FF5C7A"></i>poor</span>`;
 
   const empty = document.getElementById('mapEmpty');
   if (!map) { empty.style.display = 'block'; return; }
