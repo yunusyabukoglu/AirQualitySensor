@@ -514,7 +514,30 @@ const LAST_DEVICE_KEY = 'aq_last_device_id';
 let manualDisconnect = false;
 let reconnectTimer = null;
 let connecting = false;   // guard so manual + background connects don't race each other
+let connectGen = 0;       // bumped to invalidate/cancel any in-flight connect attempt
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Web Bluetooth promises (gatt.connect, getPrimaryService, …) can hang FOREVER
+// if the BLE stack is wedged — e.g. after refreshing the page mid-connect, which
+// leaves a half-open link so the device stops advertising. Every stage of the
+// connect path goes through this so a stuck attempt fails fast and retries.
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(label + ' timed out (' + (ms / 1000) + 's)')), ms);
+    promise.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); }
+    );
+  });
+}
+
+// Abort whatever connect attempt is in flight and wait for its loop to unwind.
+async function cancelInFlight() {
+  if (!connecting) return;
+  connectGen++;                                   // stale-mark the running loop
+  try { if (device && device.gatt) device.gatt.disconnect(); } catch {}
+  for (let i = 0; i < 30 && connecting; i++) await sleep(100);   // up to ~3 s
+}
 
 // On-screen debug log (phone has no easy access to the JS console)
 function dbg(msg) {
@@ -527,9 +550,19 @@ function dbg(msg) {
 }
 
 document.getElementById('connBtn').addEventListener('click', async () => {
-  if (device && device.gatt.connected) {
+  if (device && device.gatt.connected && !connecting) {
     manualDisconnect = true;          // don't auto-reconnect after a deliberate disconnect
     device.gatt.disconnect();
+    return;
+  }
+  // A connect attempt is running (manual or background auto-reconnect):
+  // the button reads "Cancel" — abort it so the user isn't stuck waiting.
+  if (connecting) {
+    dbg('User cancelled the connect attempt');
+    manualDisconnect = true;          // also stops the background reconnect loop
+    clearTimeout(reconnectTimer);
+    await cancelInFlight();
+    setConnected(false);
     return;
   }
   try {
@@ -540,12 +573,17 @@ document.getElementById('connBtn').addEventListener('click', async () => {
       optionalServices: [SERVICE]
     });
     dbg('Picked: ' + (dev.name || '(no name)') + '  id=' + dev.id.slice(0, 8) + '…');
+    // If a background attempt sneaked in while the chooser was open, clear it
+    // so it can't swallow this one (the old silent-return bug).
+    await cancelInFlight();
+    manualDisconnect = false;
     await bindDevice(dev);
     await connectGatt();
   } catch (e) {
     console.error(e);
     if (e.name === 'NotFoundError') return;   // user dismissed the chooser
-    const gatt = /GATT|disconnected|services/i.test(e.message || '');
+    if (e.message === 'cancelled') return;    // user pressed Cancel mid-attempt
+    const gatt = /GATT|disconnected|services|timed out/i.test(e.message || '');
     alert(gatt
       ? "Couldn't hold the connection after several tries. Power-cycle the monitor (off/on), and if it still fails, toggle the phone's Bluetooth off and on, then Connect again."
       : 'Connection failed or cancelled: ' + e.message);
@@ -564,32 +602,45 @@ async function bindDevice(dev) {
 // Android Chrome frequently drops the very first GATT connection ("GATT Server is
 // disconnected. Cannot retrieve services"), so we attempt several times with backoff,
 // fully disconnecting between tries to start each attempt clean.
+// Every await is wrapped in a timeout (a refresh mid-connect can wedge the stack so
+// promises never settle), and a generation token lets a newer attempt or the Cancel
+// button invalidate this one.
 async function connectGatt(maxAttempts = 4) {
   if (connecting) return;          // already in a connect attempt
   connecting = true;
+  const gen = ++connectGen;        // this attempt's identity
+  const stale = () => gen !== connectGen;
   clearTimeout(reconnectTimer);    // stop any background reconnect from fighting us
+  document.getElementById('connBtn').textContent = 'Cancel';
   let lastErr;
   try {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (stale()) throw new Error('cancelled');
       try {
         document.getElementById('connText').textContent =
           attempt === 1 ? 'Connecting…' : 'Connecting… (try ' + attempt + ')';
         dbg('Attempt ' + attempt + ': gatt.connect()…');
         // Make sure we're not sitting on a half-open link from a previous attempt
         if (device.gatt.connected) { try { device.gatt.disconnect(); } catch {} await sleep(200); }
-        const server = await device.gatt.connect();
+        const server = await withTimeout(device.gatt.connect(), 10000, 'gatt.connect');
         dbg('  connected=' + device.gatt.connected + ', settling…');
         await sleep(300);          // let the Android BLE stack settle before discovery
+        if (stale()) throw new Error('cancelled');
         dbg('  getPrimaryService()… (connected=' + device.gatt.connected + ')');
-        const svc = await server.getPrimaryService(SERVICE);
+        const svc = await withTimeout(server.getPrimaryService(SERVICE), 8000, 'service discovery');
         dbg('  service OK, discovering characteristics…');
-        await wireCharacteristics(svc);
+        await withTimeout(wireCharacteristics(svc), 15000, 'characteristic setup');
+        if (stale()) {             // cancelled at the last moment — don't claim success
+          try { device.gatt.disconnect(); } catch {}
+          throw new Error('cancelled');
+        }
         dbg('  ✓ fully connected');
         setConnected(true);
         requestLogDump();          // pull anything the device logged while we were away
         return;                    // success
       } catch (e) {
         lastErr = e;
+        if (e.message === 'cancelled' || stale()) { dbg('  attempt abandoned (cancelled)'); throw new Error('cancelled'); }
         dbg('  ✗ failed: ' + e.message);
         try { if (device.gatt.connected) device.gatt.disconnect(); } catch {}
         if (attempt < maxAttempts) await sleep(600 * attempt);  // backoff: 0.6s, 1.2s, 1.8s
@@ -598,6 +649,9 @@ async function connectGatt(maxAttempts = 4) {
     throw lastErr;
   } finally {
     connecting = false;
+    // Restore the button/status to reflect reality (success path already did this)
+    const ok = device && device.gatt && device.gatt.connected && !stale();
+    setConnected(!!ok);
   }
 }
 

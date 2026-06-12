@@ -1,10 +1,10 @@
 /*
  * AQ Monitor service worker
  * Caches the app on first load so it works fully offline afterward.
- * Bump CACHE_NAME (e.g. v13 -> v14) whenever you change index.html so phones
+ * Bump CACHE_NAME (e.g. v14 -> v15) whenever you change index.html so phones
  * pick up the new version instead of serving the old cached copy.
  */
-const CACHE_NAME = 'aq-monitor-v13';
+const CACHE_NAME = 'aq-monitor-v14';
 const ASSETS = [
   './',
   './index.html',
