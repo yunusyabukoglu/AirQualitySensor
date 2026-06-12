@@ -136,8 +136,8 @@
             mask:radial-gradient(circle,#000 60%,transparent 61%)}
   .scanline::before{content:"";position:absolute;left:-30%;top:0;width:60%;height:100%;
     background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--cyan) 70%,transparent),transparent)}
-  .orb-wrap.scanning .scanline{opacity:1;animation:sweep 1.1s ease-in-out}
-  .orb-wrap.scanning .core{animation:flicker 1.1s ease-in-out}
+  .orb-wrap.scanning .scanline{opacity:1;animation:sweep 1.1s ease-in-out infinite}
+  .orb-wrap.scanning .core{animation:flicker 1.1s ease-in-out infinite}
 
   /* ---------- measure button ---------- */
   .measure{position:relative;display:block;margin:10px auto 0;
@@ -483,8 +483,9 @@ const BATTERY_CHAR = 'e2e87a04-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
 const LOGCTRL_CHAR = 'e2e87a05-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
 const LOGDATA_CHAR = 'e2e87a06-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
 const MODE_CHAR    = 'e2e87a07-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
+const MEASURE_CHAR = 'e2e87a08-7c9f-4b2d-9e3a-1f6b8c4d5e7a';
 
-let device, dataChar, intervalChar, standbyChar, batteryChar, logCtrlChar, logDataChar, modeChar;
+let device, dataChar, intervalChar, standbyChar, batteryChar, logCtrlChar, logDataChar, modeChar, measureChar;
 let standbyOn = false;
 let continuousMode = true;   // mirrors the device's sensor mode
 let dumpAccum = [];   // records received during a backlog dump
@@ -703,6 +704,15 @@ async function wireCharacteristics(svc) {
     dbg('    no mode char (old firmware?)');
   }
 
+  // On-demand measurement trigger (the Measure button)
+  try {
+    measureChar = await svc.getCharacteristic(MEASURE_CHAR);
+    dbg('    measure char OK');
+  } catch (e) {
+    measureChar = null;
+    dbg('    no measure char (old firmware - Measure will show latest reading)');
+  }
+
   const iv = await intervalChar.readValue();
   const ivSec = iv.getUint16(0, true);
   document.getElementById('intervalSlider').value = ivSec;
@@ -891,7 +901,8 @@ function setConnected(c) {
 }
 
 // ---------- Incoming data ----------
-let lastDataTime = null;   // for the "Updated Xs ago" label
+let lastDataTime = null;     // for the "Updated Xs ago" label
+let measureWaiter = null;    // pending Measure press waiting for the next reading
 
 function onData(event) {
   let json;
@@ -899,6 +910,14 @@ function onData(event) {
   let d;
   try { d = JSON.parse(json); } catch { return; }
   if (d.status) return; // "starting" / "warming up" messages
+
+  // A Measure press is waiting on this reading — release it
+  if (measureWaiter) {
+    clearTimeout(measureWaiter.timer);
+    const resolve = measureWaiter.resolve;
+    measureWaiter = null;
+    resolve(true);
+  }
 
   updateLive(d);
   if (d.co2 !== undefined) {
@@ -1003,7 +1022,7 @@ function tickUpdated() {
 }
 setInterval(tickUpdated, 3000);
 
-// ---------- Measure: pull the latest reading from the device on demand ----------
+// ---------- Measure: trigger a fresh on-demand reading ----------
 const measureBtn = document.getElementById('measureBtn');
 const measureNote = document.getElementById('measureNote');
 const orbEl = document.getElementById('orb');
@@ -1015,26 +1034,58 @@ async function measureNow() {
     return;
   }
   measureBtn.disabled = true;
-  measureBtn.textContent = 'Reading…';
   orbEl.classList.add('scanning');
   const started = Date.now();
-  try {
-    const dv = await dataChar.readValue();
-    let d = null;
-    try { d = JSON.parse(new TextDecoder().decode(dv)); } catch {}
-    if (d && !d.status) {
-      updateLive(d);     // refresh the display (notifications handle history logging)
+
+  if (measureChar) {
+    // Real on-demand measurement: write the trigger, then wait for the fresh
+    // reading to arrive as a normal data notification (so it also lands in
+    // history with GPS tagging, like any other reading).
+    measureBtn.textContent = 'Measuring…';
+    measureNote.textContent = continuousMode
+      ? ''
+      : 'Duty-cycled mode: sensor warming up, ~15 s';
+    try {
+      await measureChar.writeValue(new Uint8Array([1]));
+      await new Promise((resolve, reject) => {
+        // Continuous: reading lands within ~1-2 s. Duty-cycled: warmup ~15 s.
+        const ms = continuousMode ? 8000 : 25000;
+        measureWaiter = {
+          resolve,
+          timer: setTimeout(() => { measureWaiter = null; reject(new Error('timeout')); }, ms)
+        };
+      });
       measureNote.textContent = '';
-    } else {
-      measureNote.textContent = 'Device is warming up — try again shortly';
+    } catch (e) {
+      dbg('Measure failed: ' + e.message);
+      measureNote.textContent = e.message === 'timeout'
+        ? 'No reading arrived — check the connection and try again'
+        : 'Measure failed — check the connection';
+      setTimeout(() => { measureNote.textContent = ''; }, 3500);
+    }
+  } else {
+    // Old firmware without the trigger characteristic: best we can do is show
+    // the device's most recent stored reading.
+    measureBtn.textContent = 'Reading…';
+    try {
+      const dv = await dataChar.readValue();
+      let d = null;
+      try { d = JSON.parse(new TextDecoder().decode(dv)); } catch {}
+      if (d && !d.status) {
+        updateLive(d);
+        measureNote.textContent = 'Showing the latest stored reading — flash the new firmware for true on-demand measurement';
+      } else {
+        measureNote.textContent = 'Device is warming up — try again shortly';
+      }
+      setTimeout(() => { measureNote.textContent = ''; }, 4000);
+    } catch (e) {
+      dbg('Measure read failed: ' + e.message);
+      measureNote.textContent = 'Read failed — check the connection';
       setTimeout(() => { measureNote.textContent = ''; }, 3000);
     }
-  } catch (e) {
-    dbg('Measure read failed: ' + e.message);
-    measureNote.textContent = 'Read failed — check the connection';
-    setTimeout(() => { measureNote.textContent = ''; }, 3000);
   }
-  // Let the scan animation play out even if the read returned instantly
+
+  // Let the scan animation play out even if the result returned instantly
   const wait = Math.max(0, 1100 - (Date.now() - started));
   setTimeout(() => {
     orbEl.classList.remove('scanning');
@@ -1158,7 +1209,10 @@ function setModeUI(continuous) {
 }
 
 async function setMode(continuous) {
-  if (!modeChar) { alert('Reconnect — this device firmware does not support mode switching yet.'); return; }
+  if (!modeChar) {
+    alert("The device couldn't be switched: the firmware flashed on it is older than your aq_monitor_v2.ino and doesn't have the mode characteristic. Flash the latest firmware, power-cycle the monitor, then reconnect. (The debug log shows 'no mode char' when this happens.)");
+    return;
+  }
   try {
     await modeChar.writeValue(new Uint8Array([continuous ? 1 : 0]));
     setModeUI(continuous);
