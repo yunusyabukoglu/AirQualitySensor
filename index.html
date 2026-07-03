@@ -315,15 +315,10 @@
 
     <div class="section-label">Readings</div>
     <section class="grid">
-      <div class="card wide" data-key="co2"><span class="lvl"></span>
-        <div class="k"><span class="name">CO₂</span><span class="pip" id="co2dot"></span></div>
-        <div class="v"><span id="co2">--</span><span class="u">ppm</span></div>
-        <div class="sub" id="co2status">waiting for data</div>
-      </div>
       <div class="card" data-key="pm10"><span class="lvl"></span>
         <div class="k"><span class="name">PM10</span><span class="pip"></span></div>
         <div class="v"><span id="pm10">--</span><span class="u">µg/m³</span></div>
-        <div class="sub">PM1 <span id="pm1">--</span> · PM4 <span id="pm4">--</span></div>
+        <div class="sub">PM1 <span id="pm1">--</span></div>
       </div>
       <div class="card" data-key="voc"><span class="lvl"></span>
         <div class="k"><span class="name">VOC</span><span class="pip" id="vocdot"></span></div>
@@ -346,15 +341,6 @@
     </section>
 
     <div class="section-label">Device</div>
-
-    <div class="panel">
-      <h3>Sensor mode</h3>
-      <div class="mode-toggle">
-        <button id="modeContinuous" class="mode-opt active">Continuous</button>
-        <button id="modeDuty" class="mode-opt">Duty-cycled</button>
-      </div>
-      <div class="note" id="modeNote">Continuous: sensor always on — most accurate, best when plugged in.</div>
-    </div>
 
     <div class="panel">
       <h3>Measurement interval</h3>
@@ -399,10 +385,9 @@
       <button class="btn ghost" id="syncBtn" style="padding:7px 14px;">⟳ Sync from device</button>
     </div>
     <div class="chip-row" id="metricSelect">
-      <button data-metric="co2" class="active">CO₂</button>
+      <button data-metric="voc" class="active">VOC</button>
       <button data-metric="pm25">PM2.5</button>
       <button data-metric="pm10">PM10</button>
-      <button data-metric="voc">VOC</button>
       <button data-metric="nox">NOx</button>
       <button data-metric="temp">Temp</button>
       <button data-metric="hum">Humidity</button>
@@ -448,7 +433,6 @@
   <div class="tab" id="mapTab">
     <div class="chip-row" id="mapMetricSelect">
       <button data-metric="pm25" class="active">PM2.5</button>
-      <button data-metric="co2">CO₂</button>
       <button data-metric="pm10">PM10</button>
       <button data-metric="voc">VOC</button>
       <button data-metric="nox">NOx</button>
@@ -693,17 +677,6 @@ async function wireCharacteristics(svc) {
     dbg('    no log chars (old firmware?)');
   }
 
-  // Sensor mode (continuous vs duty-cycled)
-  try {
-    modeChar = await svc.getCharacteristic(MODE_CHAR);
-    const mv = await modeChar.readValue();
-    setModeUI(mv.getUint8(0) !== 0);
-    dbg('    mode char OK');
-  } catch (e) {
-    modeChar = null;
-    dbg('    no mode char (old firmware?)');
-  }
-
   // On-demand measurement trigger (the Measure button)
   try {
     measureChar = await svc.getCharacteristic(MEASURE_CHAR);
@@ -772,23 +745,26 @@ function onLogData(event) {
   if (dv.byteLength < 1) return;
   const count = dv.getUint8(0);
   if (count === 0) { finalizeDump(); return; }   // end-of-dump sentinel
-  const REC = 22;
+  const REC = 21;   // V2 record (see firmware): sentinels 0x7FFF/0xFFFF/0xFF = no value
   const now = Date.now();
+  const u16 = (v, div=1) => v === 0xFFFF ? undefined : v / div;
   for (let i = 0; i < count; i++) {
     const o = 1 + i * REC;
     if (o + REC > dv.byteLength) break;
     const age = dv.getUint32(o, true);            // ms ago, per device clock
+    const t100 = dv.getInt16(o + 4, true);
+    const battRaw = dv.getUint8(o + 18);
     dumpAccum.push({
       t:    now - age,
-      pm1:  dv.getUint16(o + 4, true) / 10,
-      pm25: dv.getUint16(o + 6, true) / 10,
-      pm4:  dv.getUint16(o + 8, true) / 10,
-      pm10: dv.getUint16(o + 10, true) / 10,
-      co2:  dv.getUint16(o + 12, true),
-      voc:  dv.getUint16(o + 14, true),
-      nox:  dv.getUint16(o + 16, true),
-      temp: dv.getInt16(o + 18, true) / 100,
-      hum:  dv.getUint16(o + 20, true) / 100,
+      temp: t100 === 0x7FFF ? undefined : t100 / 100,
+      hum:  u16(dv.getUint16(o + 6, true), 100),
+      voc:  u16(dv.getUint16(o + 8, true)),
+      nox:  u16(dv.getUint16(o + 10, true)),
+      pm1:  u16(dv.getUint16(o + 12, true), 10),
+      pm25: u16(dv.getUint16(o + 14, true), 10),
+      pm10: u16(dv.getUint16(o + 16, true), 10),
+      batt: battRaw === 0xFF ? undefined : battRaw,
+      vbat: u16(dv.getUint16(o + 19, true), 1000),
     });
   }
   // Acknowledge by requesting the next batch (this paces the transfer to the link)
@@ -920,7 +896,7 @@ function onData(event) {
   }
 
   updateLive(d);
-  if (d.co2 !== undefined) {
+  if (d.temp !== undefined || d.voc !== undefined || d.pm25 !== undefined) {
     const entry = { t: Date.now(), ...d };
     // Attach current GPS location if tracking is on and we have a fix
     if (gpsTracking && lastPosition) {
@@ -939,14 +915,14 @@ function onData(event) {
 
 // Overall verdict drives the orb/ambient color: worst of PM2.5 and CO₂
 function levelPM25(v){ return v<=12?0 : v<=35?1 : v<=55?2 : 3; }
-function levelCO2(v){ return v<=800?0 : v<=1200?1 : v<=2000?2 : 3; }
+function levelVOC(v){ return v<=150?0 : v<=250?1 : v<=400?2 : 3; }
 const LEVEL_COLORS = [C.good, C.mod, C.poor, C.bad];
 const LEVEL_WORDS  = ['Good', 'Moderate', 'Poor', 'Unhealthy'];
 
 function setVerdict(d) {
   let lvl = -1, why = '';
   if (d.pm25 !== undefined) { const l = levelPM25(d.pm25); if (l > lvl) { lvl = l; why = 'PM2.5'; } }
-  if (d.co2  !== undefined) { const l = levelCO2(d.co2);   if (l > lvl) { lvl = l; why = 'CO₂'; } }
+  if (d.voc  !== undefined && d.voc !== null) { const l = levelVOC(d.voc); if (l > lvl) { lvl = l; why = 'VOC'; } }
   if (lvl < 0) return;
   document.documentElement.style.setProperty('--aq', LEVEL_COLORS[lvl]);
   document.getElementById('verdict').textContent =
@@ -954,8 +930,8 @@ function setVerdict(d) {
 }
 
 function updateLive(d) {
-  setText('co2', d.co2); setText('pm25', d.pm25); setText('pm10', d.pm10);
-  setText('pm1', d.pm1); setText('pm4', d.pm4);
+  setText('pm25', d.pm25); setText('pm10', d.pm10);
+  setText('pm1', d.pm1);
   setText('voc', d.voc !== undefined ? Math.round(d.voc) : undefined);
   setText('nox', d.nox !== undefined ? Math.round(d.nox) : undefined);
   setText('temp', d.temp?.toFixed(1)); setText('hum', d.hum?.toFixed(0));
@@ -968,9 +944,6 @@ function updateLive(d) {
   lastDataTime = Date.now();
   tickUpdated();
 
-  // CO2 status text
-  statusFor('co2', 'co2status', d.co2,
-    [[800,C.good,'Well ventilated'],[1200,C.mod,'Getting stuffy'],[Infinity,C.bad,'Poor — ventilate']]);
   // VOC status text
   statusFor('voc', 'vocstatus', d.voc,
     [[150,C.good,'Normal'],[250,C.mod,'Elevated'],[Infinity,C.bad,'High']]);
@@ -1192,34 +1165,6 @@ function formatLife(hours) {
   return Math.round(hours*60) + ' min';
 }
 
-// ---------- Sensor mode ----------
-function setModeUI(continuous) {
-  continuousMode = continuous;
-  document.getElementById('modeContinuous').classList.toggle('active', continuous);
-  document.getElementById('modeDuty').classList.toggle('active', !continuous);
-  document.getElementById('modeNote').textContent = continuous
-    ? 'Continuous: sensor always on — most accurate, best when plugged in. Battery life is constant regardless of interval.'
-    : 'Duty-cycled: sensor powers down between readings — longer battery at long intervals, but VOC/NOx and the first PM reading are less reliable. Best on the go.';
-  // Refresh the battery estimate since the mode changes how interval affects it
-  const sec = parseInt(document.getElementById('intervalSlider').value) || 30;
-  document.getElementById('batteryEstimate').textContent = formatLife(estimateBatteryLife(sec));
-  document.getElementById('estLabel').textContent = continuous
-    ? 'Estimated battery life (continuous)'
-    : 'Estimated battery life at this interval';
-}
-
-async function setMode(continuous) {
-  if (!modeChar) {
-    alert("The device couldn't be switched: the firmware flashed on it is older than your aq_monitor_v2.ino and doesn't have the mode characteristic. Flash the latest firmware, power-cycle the monitor, then reconnect. (The debug log shows 'no mode char' when this happens.)");
-    return;
-  }
-  try {
-    await modeChar.writeValue(new Uint8Array([continuous ? 1 : 0]));
-    setModeUI(continuous);
-  } catch (e) { console.error(e); }
-}
-document.getElementById('modeContinuous').addEventListener('click', () => setMode(true));
-document.getElementById('modeDuty').addEventListener('click', () => setMode(false));
 
 // ---------- Standby ----------
 document.getElementById('standbyBtn').addEventListener('click', async () => {
@@ -1301,22 +1246,15 @@ function stopGps() {
 }
 
 // ---------- History chart ----------
-let currentMetric = 'co2';
+let currentMetric = 'voc';
 let selectedChartT = null;   // timestamp of the tapped point, or null
 let chartState = null;       // saved geometry for hit-testing taps
-const metricLabels = { co2:'CO₂ (ppm)', pm25:'PM2.5 (µg/m³)', pm10:'PM10 (µg/m³)', voc:'VOC Index', nox:'NOx Index', temp:'Temp (°C)', hum:'Humidity (%)' };
+const metricLabels = { pm25:'PM2.5 (µg/m³)', pm10:'PM10 (µg/m³)', voc:'VOC Index', nox:'NOx Index', temp:'Temp (°C)', hum:'Humidity (%)' };
 
 // Health zones per metric, ascending by upper bound. Drawn as faint colored bands
 // behind the line so you can see at a glance whether a reading is in a good/bad range.
 // {to: upperBound, color, label}. The last band uses Infinity.
 const healthZones = {
-  co2: [
-    { to: 600,  color: '#2BC489', label: 'fresh' },
-    { to: 800,  color: '#3FE0A2', label: 'good' },
-    { to: 1000, color: '#FFD15C', label: 'moderate' },
-    { to: 1500, color: '#FF9A5A', label: 'poor' },
-    { to: Infinity, color: '#FF5C7A', label: 'unhealthy' }
-  ],
   pm25: [
     { to: 12,  color: '#3FE0A2', label: 'good' },
     { to: 35,  color: '#FFD15C', label: 'moderate' },
@@ -1359,7 +1297,6 @@ const healthZones = {
 
 // Short explanation of each metric, shown below the graph
 const metricInfo = {
-  co2: { title: 'CO₂ — Carbon Dioxide (ppm)', text: 'A direct measure of how stuffy the air is and a good proxy for ventilation. Outdoor air sits around 420 ppm. Indoors: under 800 is well-ventilated, 800–1000 is fine, 1000–1500 gets stuffy and can dull concentration, and above 1500 means the room needs fresh air.' },
   pm25: { title: 'PM2.5 — Fine Particulate Matter (µg/m³)', text: 'Tiny particles 2.5 microns or smaller — smoke, soot, combustion byproducts — small enough to reach deep into the lungs and bloodstream. 0–12 good, 12–35 moderate, 35–55 unhealthy for sensitive groups, 55–150 unhealthy, above 150 hazardous (US EPA breakpoints).' },
   pm10: { title: 'PM10 — Coarse Particulate Matter (µg/m³)', text: 'Larger particles up to 10 microns — dust, pollen, mold spores. Irritating but mostly filtered by the upper airway. 0–54 good, 54–154 moderate, 154–254 unhealthy, above 254 hazardous.' },
   voc: { title: 'VOC Index — Volatile Organic Compounds', text: 'Gases off-gassed by cleaning products, paint, furniture, cooking and people. This is a relative index centered on 100 (your recent baseline), not an absolute concentration: under 100 is cleaner than usual, 100–200 moderate, 200–300 elevated, above 300 high. A spike usually means something was just sprayed, opened, or cooked.' },
@@ -1647,7 +1584,6 @@ let mapMetric = 'pm25';
 const colorScales = {
   pm25: [[12,'#3FE0A2'],[35,'#FFD15C'],[55,'#FF9A5A'],[Infinity,'#FF5C7A']],
   pm10: [[54,'#3FE0A2'],[154,'#FFD15C'],[254,'#FF9A5A'],[Infinity,'#FF5C7A']],
-  co2:  [[800,'#3FE0A2'],[1200,'#FFD15C'],[2000,'#FF9A5A'],[Infinity,'#FF5C7A']],
   voc:  [[150,'#3FE0A2'],[250,'#FFD15C'],[400,'#FF9A5A'],[Infinity,'#FF5C7A']],
   nox:  [[20,'#3FE0A2'],[150,'#FFD15C'],[300,'#FF9A5A'],[Infinity,'#FF5C7A']]
 };
@@ -1688,7 +1624,7 @@ function renderMap() {
   document.getElementById('mapCount').textContent = located.length + ' located readings';
 
   // Legend
-  const lbl = { pm25:'PM2.5', pm10:'PM10', co2:'CO₂', voc:'VOC', nox:'NOx' }[mapMetric];
+  const lbl = { pm25:'PM2.5', pm10:'PM10', voc:'VOC', nox:'NOx' }[mapMetric];
   document.getElementById('mapLegend').innerHTML =
     `<span class="lg"><i style="background:#3FE0A2"></i>good</span>` +
     `<span class="lg"><i style="background:#FFD15C"></i>mod</span>` +
@@ -1734,7 +1670,7 @@ function renderMap() {
       radius: 7, color: '#000', weight: 1, fillColor: color, fillOpacity: 0.85
     }).bindPopup(
       `<b>${lbl}: ${Math.round(avg)}${g.n > 1 ? ' avg' : ''}</b><br>` +
-      `CO₂ ${g.latest.co2} ppm · PM2.5 ${g.latest.pm25}<br>` +
+      `VOC ${g.latest.voc ?? '--'} · PM2.5 ${g.latest.pm25 ?? '--'}<br>` +
       `${new Date(g.latest.t).toLocaleString()}` +
       countLine
     ).addTo(mapLayer);
